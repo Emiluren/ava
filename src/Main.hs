@@ -195,3 +195,4 @@ main = do
         liftIO $ appLoop renderDataCallback tickCallback sdlEventCallback startTicks
 
     destroyImages textures
+    SDL.quit
