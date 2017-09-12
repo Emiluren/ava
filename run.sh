@@ -1,3 +1,2 @@
 #!/bin/sh
-stack build
-stack exec super-awesome-power-princess
+stack build && stack exec ava

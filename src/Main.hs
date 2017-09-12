@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, RankNTypes #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import Foreign.C.Types (CInt)
@@ -35,7 +35,7 @@ initSDL = do
     SDL.initializeAll
 
     let windowSettings = SDL.defaultWindow { SDL.windowInitialSize = winSize }
-    window <- SDL.createWindow "SDL Tutorial" windowSettings
+    window <- SDL.createWindow "Ava" windowSettings
     renderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
     SDL.rendererDrawColor renderer $= V4 50 50 50 255
 
@@ -57,7 +57,7 @@ textureSize texture = do
 
 renderToPos :: SDL.Renderer -> SDL.Texture -> V2 CInt -> Int -> IO ()
 renderToPos renderer texture pos frame = do
-    texSize <- textureSize texture
+    _texSize <- textureSize texture
     let
         frameOffset = fromIntegral $ frame * 32
         sourceRect = Just $ SDL.Rectangle (P $ V2 frameOffset 0) (V2 32 32)
@@ -113,7 +113,7 @@ playerFrames = 10
 accumAnimTime :: Float -> Float -> Float
 accumAnimTime = addWithMax $ frameTime * fromIntegral playerFrames
 
-mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
+mainReflex :: (Reflex t, MonadHold t m, MonadFix m)
            => Event t Float
            -> Event t SDL.Event
            -> m (Behavior t RenderData)
