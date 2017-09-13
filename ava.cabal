@@ -26,6 +26,7 @@ executable ava
   build-depends:       base >= 4.7 && < 5
                      , containers >= 0.5
                      , dependent-sum
+                     , Hipmunk
                      , inline-c
                      , inline-c-cpp
                      , lens
@@ -33,6 +34,7 @@ executable ava
                      , mtl
                      , reflex
                      , sdl2 >= 2.1
+                     , sdl2-gfx
                      , sdl2-image
                      , StateVar
                      , template-haskell

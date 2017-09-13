@@ -12,7 +12,7 @@ import Data.IORef (readIORef)
 import Data.Map ((!), Map)
 import qualified Data.Map as Map
 import Data.Monoid ((<>))
-import Data.StateVar (($=))
+import Data.StateVar (($=), get)
 import Data.Word (Word32)
 
 import Foreign.C.String (CString, withCString, peekCString)
@@ -31,12 +31,15 @@ import qualified Language.C.Inline.Cpp as C
 
 import Linear (V2(..), V4(..))
 
+import qualified Physics.Hipmunk as H
+
 import Reflex
 import Reflex.Host.Class (newEventWithTriggerRef, runHostFrame, fireEvents)
 
 import SDL (Point(P))
 import qualified SDL
 import qualified SDL.Image
+import qualified SDL.Primitive as SDL
 
 import SpriterTypes
 
@@ -63,6 +66,26 @@ winSize = V2 winWidth winHeight
 
 timeStep :: Double
 timeStep = 1/60
+
+shelfStart, shelfEnd :: Num a => (a, a)
+shelfStart = (100, 200)
+shelfEnd = (400, 300)
+
+makeHVector :: (Double, Double) -> H.Vector
+makeHVector = uncurry H.Vector
+
+makeSdlPoint :: Num a => (a, a) -> SDL.Point V2 a
+makeSdlPoint = SDL.P . uncurry SDL.V2
+
+startV, endV :: H.Vector
+(startV, endV) = (makeHVector shelfStart, makeHVector shelfEnd)
+
+startP, endP :: SDL.Point V2 CInt
+(startP, endP) = (makeSdlPoint shelfStart, makeSdlPoint shelfEnd)
+
+circleMass, circleRadius :: Num a => a
+circleMass = 10
+circleRadius = 20
 
 makeLenses ''Sprite
 makeLenses ''SpriterPoint
@@ -198,6 +221,44 @@ main = do
     entityInstance <- withCString "Character" $ modelGetNewEntityInstance spriterModel
     withCString "Run" $ entityInstanceSetCurrentAnimation entityInstance
 
+    putStrLn "Initializing chipmunk"
+    H.initChipmunk
+
+    putStrLn "Creating chipmunk space"
+    space <- H.newSpace
+    H.gravity space $= H.Vector 0 (200)
+
+    wall <- H.newBody H.infinity H.infinity
+    H.position wall $= H.Vector 0 0
+
+    shelf <- H.newShape wall (H.LineSegment startV endV 1) (H.Vector 0 0)
+    H.friction shelf $= 1.0
+    H.elasticity shelf $= 0.6
+    H.spaceAdd space $ H.Static shelf
+
+    let tl = H.Vector 0 0
+        bl = H.Vector 0 winHeight
+        tr = H.Vector winWidth 0
+        br = H.Vector winWidth winHeight
+
+        corners = [tl, bl, br, tr]
+        edges = zip corners $ tail corners ++ [head corners]
+
+    forM_ edges $ \(start, end) -> do
+        w <- H.newShape wall (H.LineSegment start end 1) (H.Vector 0 0)
+        H.friction w $= 1.0
+        H.spaceAdd space $ H.Static w
+
+    let circleMoment = H.momentForCircle circleMass (0, circleRadius) (H.Vector 0 0)
+
+    circleBody <- H.newBody circleMass circleMoment
+    H.spaceAdd space circleBody
+
+    circleShape <- H.newShape circleBody (H.Circle circleRadius) (H.Vector 0 0)
+    H.friction circleShape $= 1.0
+    H.spaceAdd space circleShape
+    H.position circleBody $= H.Vector 200 20
+
     let
         princessTexture = textures ! "princess_running.png"
 
@@ -216,6 +277,8 @@ main = do
 
             renderToPos renderer princessTexture pos frame
             [C.exp| void { $(EntityInstance* entityInstance)->render() } |]
+            renderShelf renderer
+            renderCircleBody renderer circleBody
 
             SDL.present renderer
 
@@ -239,6 +302,8 @@ main = do
                 $(EntityInstance* entityInstance)->setTimeElapsed($(double cTimeStep))
             } |]
             tickCallback $ fromIntegral dtMs / 1000
+
+            H.step space $ fromIntegral dtMs / 1000
 
             unless qPressed $ appLoop
                 renderDataCallback
@@ -265,6 +330,7 @@ main = do
     free spriterModel
     freeHaskellFunPtr imgloader
     freeHaskellFunPtr renderf
+    H.freeSpace space
 
 loadSpriterModel :: (FunPtr ImageLoader) -> (FunPtr Renderer) -> CString -> IO (Ptr CSpriterModel)
 loadSpriterModel imgloader renderer modelPath =
@@ -316,6 +382,7 @@ renderSprite renderer spritePtr spriteStatePtr = do
     textureInfo <- SDL.queryTexture $ sprite ^. spriteTexture
     --putStrLn $ "rendering: " ++ sprite ^. spriteName
     --print spriteState
+    -- TODO: Scale and alpha are not used, maybe switch to SFML
     let w = fromIntegral $ SDL.textureWidth textureInfo
         h = fromIntegral $ SDL.textureHeight textureInfo
         px = floor $ (sprite ^. spritePivotX) * fromIntegral w
@@ -329,3 +396,22 @@ renderSprite renderer spritePtr spriteStatePtr = do
         renderRect = SDL.Rectangle (SDL.P $ V2 x y) (V2 w h)
     SDL.copyEx
         renderer texture Nothing (Just $ renderRect) (CDouble degAngle) pivot (V2 False False)
+
+renderShelf :: SDL.Renderer -> IO ()
+renderShelf renderer = do
+    SDL.rendererDrawColor renderer $= V4 255 255 255 255
+    SDL.drawLine renderer startP endP
+
+renderCircleBody :: SDL.Renderer -> H.Body -> IO ()
+renderCircleBody renderer ballBody = do
+    H.Vector x y <- get $ H.position ballBody
+
+    let sdlPos = V2 (floor x) (floor y)
+    SDL.fillCircle renderer sdlPos circleRadius (V4 255 255 255 255)
+
+    SDL.rendererDrawColor renderer $= V4 100 100 100 255
+    angle <- get $ H.angle ballBody
+    let edgePoint = SDL.P $ sdlPos + V2
+            (floor $ cos angle * circleRadius)
+            (floor $ sin angle * circleRadius)
+    SDL.drawLine renderer (SDL.P $ sdlPos) edgePoint
