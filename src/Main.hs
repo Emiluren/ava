@@ -6,6 +6,7 @@ import Control.Monad (unless)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (liftIO)
 
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Map ((!), Map)
 import qualified Data.Map as Map
 import Data.StateVar (($=), get)
@@ -19,6 +20,7 @@ import Foreign.StablePtr
     , deRefStablePtr
     , castStablePtrToPtr
     , castPtrToStablePtr
+    , freeStablePtr
     )
 import Foreign.Storable
 
@@ -88,25 +90,6 @@ initSDL = do
     SDL.rendererDrawColor renderer $= V4 50 50 50 255
 
     return renderer
-
-loadImage :: SDL.Renderer -> CString -> CDouble -> CDouble -> IO (Ptr Spriter.Sprite)
-loadImage renderer filename pivotX pivotY = do
-    name <- peekCString filename
-
-    tex <- SDL.Image.loadTexture renderer $ name
-    putStrLn $ "Loaded " ++ name
-
-    let sprite = Spriter.Sprite
-            { Spriter._spriteTexture = tex
-            , Spriter._spritePivotX = pivotX
-            , Spriter._spritePivotY = pivotY
-            , Spriter._spriteName = name
-            }
-
-    stablePtr <- newStablePtr sprite
-
-    -- TODO: Memory leak, make sure stablePtr is freed on exit
-    return $ castPtr $ castStablePtrToPtr stablePtr
 
 loadImages :: SDL.Renderer -> [String] -> IO (Map String SDL.Texture)
 loadImages renderer files =
@@ -215,10 +198,7 @@ mainReflex sdlEvent time = do
                 player <- sample currentPlayer
                 t <- sample time
                 let p = calcPos player t
-                    player' = player
-                        { startX = p
-                        , t0 = t
-                        }
+                    player' = player { startX = p, t0 = t }
                 case eventKeycode sdlE of
                     SDL.KeycodeA -> do
                         return $ Just $ player' { aPressed = isPress sdlE }
@@ -242,7 +222,28 @@ main = do
     renderer <- initSDL
     textures <- loadImages renderer ["princess_running.png"]
 
-    imgloader <- Spriter.makeImageLoader $ loadImage renderer
+    loadedImages <- newIORef []
+
+    let loadImage :: CString -> CDouble -> CDouble -> IO (Ptr Spriter.Sprite)
+        loadImage filename pivotX pivotY = do
+            name <- peekCString filename
+
+            tex <- SDL.Image.loadTexture renderer $ name
+            putStrLn $ "Loaded " ++ name
+
+            let sprite = Spriter.Sprite
+                    { Spriter._spriteTexture = tex
+                    , Spriter._spritePivotX = pivotX
+                    , Spriter._spritePivotY = pivotY
+                    , Spriter._spriteName = name
+                    }
+
+            stablePtr <- newStablePtr sprite
+
+            modifyIORef' loadedImages (stablePtr:)
+            return $ castPtr $ castStablePtrToPtr stablePtr
+
+    imgloader <- Spriter.makeImageLoader $ loadImage
     renderf <- Spriter.makeRenderer $ renderSprite renderer
 
     Spriter.setErrorFunction
@@ -351,6 +352,14 @@ main = do
         liftIO $ appLoop startTime
 
     destroyImages textures
+
+    spriterImages <- readIORef loadedImages
+    forM_ spriterImages $ \sprPtr -> do
+        spr <- deRefStablePtr sprPtr
+        let tex = spr ^. Spriter.spriteTexture
+        SDL.destroyTexture tex
+        freeStablePtr sprPtr
+
     SDL.quit
 
     free entityInstance
