@@ -100,11 +100,6 @@ initSDL :: IO SDL.Renderer
 initSDL = do
     SDL.initializeAll
 
-    aaSucceded <-
-        SDL.setHintWithPriority SDL.DefaultPriority SDL.HintRenderScaleQuality SDL.ScaleLinear
-
-    unless aaSucceded $ putStrLn "Warning: Could not set anti-aliasing"
-
     let windowSettings = SDL.defaultWindow { SDL.windowInitialSize = winSize }
     window <- SDL.createWindow "Ava" windowSettings
     renderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
@@ -160,13 +155,13 @@ isKeyPressed key event =
         _ ->
             False
 
-playerSpeed :: Float
+playerSpeed :: Double
 playerSpeed = 5.0 * 100
 
-playerVx :: Bool -> Bool -> Float
-playerVx True False = -playerSpeed
-playerVx False True = playerSpeed
-playerVx _ _ = 0
+controlVx :: Num a => a -> Bool -> Bool -> a
+controlVx x True False = -x
+controlVx x False True = x
+controlVx _ _ _ = 0
 
 addWithMax :: (Num a, Ord a) => a -> a -> a -> a
 addWithMax maxV x y =
@@ -175,29 +170,36 @@ addWithMax maxV x y =
     else
         x + y
 
-frameTime :: Float
+frameTime :: Double
 frameTime = 0.05
 
 playerFrames :: Int
 playerFrames = 10
 
-accumAnimTime :: Float -> Float -> Float
+accumAnimTime :: Double -> Double -> Double
 accumAnimTime = addWithMax $ frameTime * fromIntegral playerFrames
 
 mainReflex :: (Reflex t, MonadHold t m, MonadFix m)
-           => Event t Float
+           => Event t Double
            -> Event t SDL.Event
-           -> m (Behavior t RenderData)
+           -> m (Behavior t RenderData, Behavior t H.Vector, Event t Double)
 mainReflex tickEvent sdlEvent = do
     let keyEvent = fmapMaybe getKeyEvent sdlEvent
-        startPos = V2 10.0 400.0 :: V2 Float
+        startPos = V2 10.0 400.0 :: V2 Double
         pressedKeyB key = hold False $ isPress <$> ffilter (isKey key) keyEvent
+        spacePressedE = isPress <$> ffilter (isKey SDL.KeycodeSpace) keyEvent
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
 
-    let vx = playerVx <$> aPressed <*> dPressed
+    leftPressed <- pressedKeyB SDL.KeycodeLeft
+    rightPressed <- pressedKeyB SDL.KeycodeRight
+
+    let vx = controlVx playerSpeed <$> aPressed <*> dPressed
         dx = attachWith (*) vx tickEvent
+
+        ballAccX = controlVx 2000 <$> leftPressed <*> rightPressed
+        ballAcc = H.Vector <$> ballAccX <*> pure 0
 
     pos <- foldDyn (+) startPos $ fmap (`V2` 0) dx
     animTime <- foldDyn accumAnimTime 0 tickEvent
@@ -205,7 +207,10 @@ mainReflex tickEvent sdlEvent = do
     let posInt = fmap floor <$> current pos
         playerAnimFrame = (\x -> floor $ x / frameTime) <$> current animTime
 
-    return $ RenderData <$> posInt <*> playerAnimFrame
+        renderData = RenderData <$> posInt <*> playerAnimFrame
+        jumpEvent = 1000 <$ spacePressedE
+
+    return $ (renderData, ballAcc, jumpEvent)
 
 main :: IO ()
 main = do
@@ -284,16 +289,20 @@ main = do
 
         appLoop ::
             IO RenderData ->
-            (Float -> IO ()) ->
+            IO H.Vector ->
+            (Double -> IO ()) ->
             (SDL.Event -> IO ()) ->
             Word32 ->
             IO ()
-        appLoop renderDataCallback tickCallback sdlEventCallback oldTime = do
+        appLoop sampleRenderData sampleBallForce tickCallback sdlEventCallback oldTime = do
             events <- SDL.pollEvents
             let qPressed = any (isKeyPressed SDL.KeycodeQ) events
             mapM_ sdlEventCallback events
 
-            renderDataCallback >>= render
+            sampleRenderData >>= render
+            ballForce <- sampleBallForce
+
+            H.applyOnlyForce circleBody ballForce (H.Vector 0 0)
 
             newTime <- SDL.ticks
             let dtMs = newTime - oldTime
@@ -306,7 +315,8 @@ main = do
             H.step space $ fromIntegral dtMs / 1000
 
             unless qPressed $ appLoop
-                renderDataCallback
+                sampleRenderData
+                sampleBallForce
                 tickCallback
                 sdlEventCallback
                 newTime
@@ -315,13 +325,15 @@ main = do
         (tickEvent, tickTriggerRef) <- newEventWithTriggerRef
         (sdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
 
-        renderData <- mainReflex tickEvent sdlEvent
-        let renderDataCallback = runSpiderHost $ runHostFrame (sample renderData)
+        (renderData, ballForce, jumpEvent) <- mainReflex tickEvent sdlEvent
+        let sampleRenderData = runSpiderHost $ runHostFrame (sample renderData)
+            sampleBallForce = runSpiderHost $ runHostFrame (sample ballForce)
             tickCallback dt = runSpiderHost $ handleTrigger dt tickTriggerRef
             sdlEventCallback dt = runSpiderHost $ handleTrigger dt sdlTriggerRef
 
         startTicks <- SDL.ticks
-        liftIO $ appLoop renderDataCallback tickCallback sdlEventCallback startTicks
+        liftIO $ appLoop
+            sampleRenderData sampleBallForce tickCallback sdlEventCallback startTicks
 
     destroyImages textures
     SDL.quit
