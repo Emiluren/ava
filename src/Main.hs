@@ -263,7 +263,8 @@ main = do
     wall <- H.newBody H.infinity H.infinity
     H.position wall $= H.Vector 0 0
 
-    shelf <- H.newShape wall (H.LineSegment startV endV 1) (H.Vector 0 0)
+    let shelfShapeType = H.LineSegment startV endV 1
+    shelf <- H.newShape wall shelfShapeType (H.Vector 0 0)
     H.friction shelf $= 1.0
     H.elasticity shelf $= 0.6
     H.spaceAdd space $ H.Static shelf
@@ -286,7 +287,8 @@ main = do
     circleBody <- H.newBody circleMass circleMoment
     H.spaceAdd space circleBody
 
-    circleShape <- H.newShape circleBody (H.Circle circleRadius) (H.Vector 0 0)
+    let circleShapeType = H.Circle circleRadius
+    circleShape <- H.newShape circleBody circleShapeType (H.Vector 0 0)
     H.friction circleShape $= 1.0
     H.spaceAdd space circleShape
     H.position circleBody $= H.Vector 200 20
@@ -300,8 +302,8 @@ main = do
 
             renderToPos renderer princessTexture pos frame
             [C.exp| void { $(EntityInstance* entityInstance)->render() } |]
-            renderShelf renderer
-            renderCircleBody renderer circleBody
+            renderShape renderer shelf shelfShapeType
+            renderShape renderer circleShape circleShapeType
 
             SDL.present renderer
 
@@ -426,21 +428,37 @@ renderSprite renderer spritePtr spriteStatePtr = do
     SDL.copyEx
         renderer texture Nothing (Just $ renderRect) (CDouble degAngle) pivot (V2 False False)
 
-renderShelf :: SDL.Renderer -> IO ()
-renderShelf renderer = do
-    SDL.rendererDrawColor renderer $= V4 255 255 255 255
-    SDL.drawLine renderer startP endP
+convV :: H.Vector -> SDL.Point V2 CInt
+convV (H.Vector x y) = SDL.P $ V2 (floor x) (floor y)
 
-renderCircleBody :: SDL.Renderer -> H.Body -> IO ()
-renderCircleBody renderer ballBody = do
-    H.Vector x y <- get $ H.position ballBody
+renderShape :: SDL.Renderer -> H.Shape -> H.ShapeType -> IO ()
+renderShape renderer shape (H.Circle radius) = do
+    H.Vector px py <- get $ H.position $ H.body shape
+    angle <- get $ H.angle $ H.body shape
 
-    let sdlPos = V2 (floor x) (floor y)
-    SDL.fillCircle renderer sdlPos circleRadius (V4 255 255 255 255)
+    let sdlPos = V2 (floor px) (floor py)
+    SDL.fillCircle renderer sdlPos (floor radius) (V4 255 255 255 255)
 
     SDL.rendererDrawColor renderer $= V4 100 100 100 255
-    angle <- get $ H.angle ballBody
     let edgePoint = SDL.P $ sdlPos + V2
-            (floor $ cos angle * circleRadius)
-            (floor $ sin angle * circleRadius)
+            (floor $ cos angle * radius)
+            (floor $ sin angle * radius)
     SDL.drawLine renderer (SDL.P $ sdlPos) edgePoint
+renderShape renderer shape (H.LineSegment p1 p2 _) = do
+    pos <- get $ H.position $ H.body shape
+    SDL.rendererDrawColor renderer $= V4 255 255 255 255
+    SDL.drawLine renderer (convV $ p1 + pos) (convV $ p2 + pos)
+renderShape renderer shape (H.Polygon verts) = do
+    pos <- get $ H.position $ H.body shape
+    angle <- get $ H.angle $ H.body shape
+    let rot = H.rotate $ H.fromAngle angle
+        verts' :: [H.Vector]
+        verts' = map ((+pos) . rot) verts
+        sdlVerts = map convV verts'
+    SDL.rendererDrawColor renderer $= V4 255 255 255 255
+
+    -- Would crash if there was a polygon without vertices but that should be impossible
+    let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
+    forM_ edges $ \(pos1, pos2) -> do
+        SDL.drawLine renderer pos1 pos2
+    SDL.drawPoint renderer $ convV pos
