@@ -1,21 +1,19 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes, RecursiveDo, ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables #-}
 module Main where
 
 import Control.Lens ((^.))
-import Control.Lens.TH (makeLenses)
 import Control.Monad (unless)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (liftIO)
 
 import Data.Map ((!), Map)
 import qualified Data.Map as Map
-import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
 
 import Foreign.C.String (CString, withCString, peekCString)
 import Foreign.C.Types (CInt, CDouble(..))
 import Foreign.Marshal.Alloc (free)
-import Foreign.Ptr (Ptr, castPtr, FunPtr, freeHaskellFunPtr)
+import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr)
 import Foreign.StablePtr
     ( newStablePtr
     , deRefStablePtr
@@ -23,8 +21,6 @@ import Foreign.StablePtr
     , castPtrToStablePtr
     )
 import Foreign.Storable
-
-import qualified Language.C.Inline.Cpp as C
 
 import Linear (V2(..), V4(..))
 
@@ -44,21 +40,13 @@ import qualified SDL
 import qualified SDL.Image
 import qualified SDL.Primitive as SDL
 
-import SpriterTypes
+import qualified SpriterTypes as Spriter
+import qualified SpriterBindings as Spriter
 
 data RenderData = RenderData
     { playerPos :: V2 CInt
     , animFrame :: Int
     }
-
-C.context $ C.cppCtx <> C.funCtx <> spriterCtx
-
-C.include "<spriterengine/spriterengine.h>"
-C.include "<spriterengine/override/filefactory.h>"
-C.include "<spriterengine/global/settings.h>"
-C.include "SpriterHelpers.hpp"
-
-C.using "namespace SpriterEngine"
 
 winWidth, winHeight :: Num a => a
 winWidth = 800
@@ -90,15 +78,6 @@ circleMass, circleRadius :: Num a => a
 circleMass = 10
 circleRadius = 20
 
-makeLenses ''Sprite
-makeLenses ''SpriterPoint
-makeLenses ''CSpriteState
-
-type SpriterFolders = Map Int (Map Int Sprite)
-
-type ImageLoader = CString -> CDouble -> CDouble -> IO (Ptr Sprite)
-type Renderer = Ptr Sprite -> Ptr CSpriteState -> IO ()
-
 initSDL :: IO SDL.Renderer
 initSDL = do
     SDL.initializeAll
@@ -109,6 +88,25 @@ initSDL = do
     SDL.rendererDrawColor renderer $= V4 50 50 50 255
 
     return renderer
+
+loadImage :: SDL.Renderer -> CString -> CDouble -> CDouble -> IO (Ptr Spriter.Sprite)
+loadImage renderer filename pivotX pivotY = do
+    name <- peekCString filename
+
+    tex <- SDL.Image.loadTexture renderer $ name
+    putStrLn $ "Loaded " ++ name
+
+    let sprite = Spriter.Sprite
+            { Spriter._spriteTexture = tex
+            , Spriter._spritePivotX = pivotX
+            , Spriter._spritePivotY = pivotY
+            , Spriter._spriteName = name
+            }
+
+    stablePtr <- newStablePtr sprite
+
+    -- TODO: Memory leak, make sure stablePtr is freed on exit
+    return $ castPtr $ castStablePtrToPtr stablePtr
 
 loadImages :: SDL.Renderer -> [String] -> IO (Map String SDL.Texture)
 loadImages renderer files =
@@ -244,14 +242,14 @@ main = do
     renderer <- initSDL
     textures <- loadImages renderer ["princess_running.png"]
 
-    imgloader <- $(C.mkFunPtr [t| ImageLoader |]) $ loadImage renderer
-    renderf <- $(C.mkFunPtr [t| Renderer |]) $ renderSprite renderer
+    imgloader <- Spriter.makeImageLoader $ loadImage renderer
+    renderf <- Spriter.makeRenderer $ renderSprite renderer
 
-    [C.exp| void { Settings::setErrorFunction(Settings::simpleError); } |]
+    Spriter.setErrorFunction
     spriterModel <- withCString "res/CharacterTest/CharacterTest.scon"
-        (loadSpriterModel imgloader renderf)
-    entityInstance <- withCString "Character" $ modelGetNewEntityInstance spriterModel
-    withCString "Run" $ entityInstanceSetCurrentAnimation entityInstance
+        (Spriter.loadSpriterModel imgloader renderf)
+    entityInstance <- withCString "Character" $ Spriter.modelGetNewEntityInstance spriterModel
+    withCString "Run" $ Spriter.entityInstanceSetCurrentAnimation entityInstance
 
     putStrLn "Initializing chipmunk"
     H.initChipmunk
@@ -301,7 +299,7 @@ main = do
             SDL.clear renderer
 
             renderToPos renderer princessTexture pos frame
-            [C.exp| void { $(EntityInstance* entityInstance)->render() } |]
+            Spriter.renderEntityInstance entityInstance
             renderShape renderer shelf shelfShapeType
             renderShape renderer circleShape circleShapeType
 
@@ -344,9 +342,7 @@ main = do
                 let dt = newTime - oldTime
                     spriterTimeStep = CDouble $ dt * 1000
 
-                [C.exp| void {
-                    $(EntityInstance* entityInstance)->setTimeElapsed($(double spriterTimeStep))
-                } |]
+                Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
 
                 H.step space dt
 
@@ -363,67 +359,25 @@ main = do
     freeHaskellFunPtr renderf
     H.freeSpace space
 
-loadSpriterModel :: (FunPtr ImageLoader) -> (FunPtr Renderer) -> CString -> IO (Ptr CSpriterModel)
-loadSpriterModel imgloader renderer modelPath =
-    [C.exp| SpriterModel*
-        {
-            new SpriterModel(
-                $(char* modelPath),
-                new SpriterFileFactory(
-                        $(HaskellSprite* (*imgloader)(const char*, double, double)),
-                        $(void (*renderer)(HaskellSprite*, SpriteState*))
-                )
-          )
-        }|]
-
-modelGetNewEntityInstance :: Ptr CSpriterModel -> CString -> IO (Ptr CEntityInstance)
-modelGetNewEntityInstance model entityName =
-    [C.exp| EntityInstance*
-        { $(SpriterModel* model)->getNewEntityInstance($(char* entityName)) }|]
-
-entityInstanceSetCurrentAnimation :: Ptr CEntityInstance -> CString -> IO ()
-entityInstanceSetCurrentAnimation ptr animName =
-    [C.exp| void
-        { $(EntityInstance* ptr)->setCurrentAnimation($(char* animName)) } |]
-
-loadImage :: SDL.Renderer -> CString -> CDouble -> CDouble -> IO (Ptr Sprite)
-loadImage renderer filename pivotX pivotY = do
-    name <- peekCString filename
-
-    tex <- SDL.Image.loadTexture renderer $ name
-    putStrLn $ "Loaded " ++ name
-
-    let sprite = Sprite
-            { _spriteTexture = tex
-            , _spritePivotX = pivotX
-            , _spritePivotY = pivotY
-            , _spriteName = name
-            }
-
-    stablePtr <- newStablePtr sprite
-
-    -- TODO: Memory leak, make sure stablePtr is freed on exit
-    return $ castPtr $ castStablePtrToPtr stablePtr
-
-renderSprite :: SDL.Renderer -> Renderer
+renderSprite :: SDL.Renderer -> Spriter.Renderer
 renderSprite renderer spritePtr spriteStatePtr = do
     sprite <- deRefStablePtr $ castPtrToStablePtr $ castPtr $ spritePtr
     spriteState <- peek spriteStatePtr
 
-    textureInfo <- SDL.queryTexture $ sprite ^. spriteTexture
+    textureInfo <- SDL.queryTexture $ sprite ^. Spriter.spriteTexture
     --putStrLn $ "rendering: " ++ sprite ^. spriteName
     --print spriteState
     -- TODO: Scale and alpha are not used, maybe switch to SFML
     let w = fromIntegral $ SDL.textureWidth textureInfo
         h = fromIntegral $ SDL.textureHeight textureInfo
-        px = floor $ (sprite ^. spritePivotX) * fromIntegral w
-        py = floor $ (sprite ^. spritePivotY) * fromIntegral h
+        px = floor $ (sprite ^. Spriter.spritePivotX) * fromIntegral w
+        py = floor $ (sprite ^. Spriter.spritePivotY) * fromIntegral h
         pivot = Just $ SDL.P $ V2 px py
-        angle = spriteState ^. spriteStateAngle
+        angle = spriteState ^. Spriter.spriteStateAngle
         degAngle = angle * (180/pi)
-        x = floor $ spriteState^.spriteStatePosition.pointX + 400 - fromIntegral px
-        y = floor $ spriteState^.spriteStatePosition.pointY + 400 - fromIntegral py
-        texture = sprite ^. spriteTexture
+        x = floor $ spriteState^.Spriter.spriteStatePosition.Spriter.pointX + 400 - fromIntegral px
+        y = floor $ spriteState^.Spriter.spriteStatePosition.Spriter.pointY + 400 - fromIntegral py
+        texture = sprite ^. Spriter.spriteTexture
         renderRect = SDL.Rectangle (SDL.P $ V2 x y) (V2 w h)
     SDL.copyEx
         renderer texture Nothing (Just $ renderRect) (CDouble degAngle) pivot (V2 False False)

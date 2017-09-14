@@ -16,10 +16,11 @@ extra-source-files:  README.md
 executable ava
   hs-source-dirs:      src
   main-is:             Main.hs
-  other-modules:       SpriterTypes
+  other-modules:       SpriterBindings
+                     , SpriterTypes
   default-language:    Haskell2010
   extra-libraries:     spriterengine stdc++
-  c-sources:           src/Main.cpp
+  c-sources:           src/SpriterBindings.cpp
                      , src/jsonspriterfiledocumentwrapper.cpp
                      , src/jsonspriterfileattributewrapper.cpp
                      , src/jsonspriterfileelementwrapper.cpp

@@ -1,6 +1,7 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings #-}
 module SpriterTypes where
 
+import Control.Lens.TH (makeLenses)
 import Data.Map (Map)
 import qualified Data.Map as Map
 
@@ -22,6 +23,7 @@ data SpriterPoint = SpriterPoint
     { _pointX :: Double
     , _pointY :: Double
     } deriving Show
+makeLenses ''SpriterPoint
 
 data CSpriteState = CSpriteState
     { _spriteStateAlpha :: Double
@@ -30,6 +32,7 @@ data CSpriteState = CSpriteState
     , _spriteStateScale :: SpriterPoint
     , _spriteStatePivot :: SpriterPoint
     } deriving Show
+makeLenses ''CSpriteState
 
 data Sprite = Sprite
     { _spriteTexture :: SDL.Texture
@@ -37,6 +40,7 @@ data Sprite = Sprite
     , _spritePivotY :: CDouble
     , _spriteName :: String
     }
+makeLenses ''Sprite
 
 -- TODO: alignment may be completely wrong
 instance Storable SpriterPoint where
