@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes, RecursiveDo, ScopedTypeVariables #-}
 module Main where
 
 import Control.Lens ((^.))
@@ -135,9 +135,11 @@ isPress :: SDL.KeyboardEventData -> Bool
 isPress event =
     SDL.keyboardEventKeyMotion event == SDL.Pressed
 
+eventKeycode :: SDL.KeyboardEventData -> SDL.Keycode
+eventKeycode = SDL.keysymKeycode . SDL.keyboardEventKeysym
+
 isKey :: SDL.Keycode -> SDL.KeyboardEventData -> Bool
-isKey keycode event =
-    SDL.keysymKeycode (SDL.keyboardEventKeysym event) == keycode
+isKey keycode = (== keycode) . eventKeycode
 
 getKeyEvent :: SDL.Event -> Maybe SDL.KeyboardEventData
 getKeyEvent event =
@@ -163,49 +165,76 @@ controlVx x True False = -x
 controlVx x False True = x
 controlVx _ _ _ = 0
 
-addWithMax :: (Num a, Ord a) => a -> a -> a -> a
-addWithMax maxV x y =
-    if x + y > maxV then
-        x + y - maxV
-    else
-        x + y
-
 frameTime :: Double
 frameTime = 0.05
 
 playerFrames :: Int
 playerFrames = 10
 
-accumAnimTime :: Double -> Double -> Double
-accumAnimTime = addWithMax $ frameTime * fromIntegral playerFrames
+data Player = Player
+    { startX :: Double
+    , aPressed :: Bool
+    , dPressed :: Bool
+    , t0 :: Double
+    }
 
-mainReflex :: (Reflex t, MonadHold t m, MonadFix m)
-           => Event t Double
-           -> Event t SDL.Event
+mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
+           => Event t SDL.Event
+           -> Behavior t Double
            -> m (Behavior t RenderData, Behavior t H.Vector, Event t Double)
-mainReflex tickEvent sdlEvent = do
+mainReflex sdlEvent time = do
     let keyEvent = fmapMaybe getKeyEvent sdlEvent
-        startPos = V2 10.0 400.0 :: V2 Double
         pressedKeyB key = hold False $ isPress <$> ffilter (isKey key) keyEvent
         spacePressedE = isPress <$> ffilter (isKey SDL.KeycodeSpace) keyEvent
-
-    aPressed <- pressedKeyB SDL.KeycodeA
-    dPressed <- pressedKeyB SDL.KeycodeD
 
     leftPressed <- pressedKeyB SDL.KeycodeLeft
     rightPressed <- pressedKeyB SDL.KeycodeRight
 
-    let vx = controlVx playerSpeed <$> aPressed <*> dPressed
-        dx = attachWith (*) vx tickEvent
+    startTime <- sample time
+
+    let -- vx = controlVx playerSpeed <$> aPressed <*> dPressed
+        -- dx = attachWith (*) vx tickEvent
 
         ballAccX = controlVx 2000 <$> leftPressed <*> rightPressed
         ballAcc = H.Vector <$> ballAccX <*> pure 0
 
-    pos <- foldDyn (+) startPos $ fmap (`V2` 0) dx
-    animTime <- foldDyn accumAnimTime 0 tickEvent
+        startPlayer = Player
+            { startX = 10
+            , aPressed = False
+            , dPressed = False
+            , t0 = startTime
+            }
 
-    let posInt = fmap floor <$> current pos
-        playerAnimFrame = (\x -> floor $ x / frameTime) <$> current animTime
+        calcPos (Player x0 a d t0') t =
+            let v = controlVx playerSpeed a d
+            in x0 + (t - t0') * v
+
+    -- pos <- foldDyn (+) startPos $ fmap (`V2` 0) dx
+
+    rec
+        let pos = calcPos <$> currentPlayer <*> time
+
+            newPlayer :: SDL.KeyboardEventData -> PushM t (Maybe Player)
+            newPlayer sdlE = do
+                player <- sample currentPlayer
+                t <- sample time
+                let p = calcPos player t
+                    player' = player
+                        { startX = p
+                        , t0 = t
+                        }
+                case eventKeycode sdlE of
+                    SDL.KeycodeA -> do
+                        return $ Just $ player' { aPressed = isPress sdlE }
+                    SDL.KeycodeD -> do
+                        return $ Just $ player' { dPressed = isPress sdlE }
+                    _ ->
+                        return Nothing
+
+        currentPlayer <- hold startPlayer $ push newPlayer keyEvent
+
+    let posInt = V2 <$> (floor <$> pos) <*> pure 400
+        playerAnimFrame = (\t -> floor (t / frameTime) `mod` playerFrames) <$> time
 
         renderData = RenderData <$> posInt <*> playerAnimFrame
         jumpEvent = 1000 <$ spacePressedE
@@ -287,53 +316,48 @@ main = do
 
             SDL.present renderer
 
-        appLoop ::
-            IO RenderData ->
-            IO H.Vector ->
-            (Double -> IO ()) ->
-            (SDL.Event -> IO ()) ->
-            Word32 ->
-            IO ()
-        appLoop sampleRenderData sampleBallForce tickCallback sdlEventCallback oldTime = do
-            events <- SDL.pollEvents
-            let qPressed = any (isKeyPressed SDL.KeycodeQ) events
-            mapM_ sdlEventCallback events
-
-            sampleRenderData >>= render
-            ballForce <- sampleBallForce
-
-            H.applyOnlyForce circleBody ballForce (H.Vector 0 0)
-
-            newTime <- SDL.ticks
-            let dtMs = newTime - oldTime
-                cTimeStep = CDouble $ fromIntegral dtMs
-            [C.exp| void {
-                $(EntityInstance* entityInstance)->setTimeElapsed($(double cTimeStep))
-            } |]
-            tickCallback $ fromIntegral dtMs / 1000
-
-            H.step space $ fromIntegral dtMs / 1000
-
-            unless qPressed $ appLoop
-                sampleRenderData
-                sampleBallForce
-                tickCallback
-                sdlEventCallback
-                newTime
-
     runSpiderHost $ do
-        (tickEvent, tickTriggerRef) <- newEventWithTriggerRef
         (sdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
+        (eUpdateTime, eUpdateTimeTriggerRef) <- newEventWithTriggerRef
 
-        (renderData, ballForce, jumpEvent) <- mainReflex tickEvent sdlEvent
+        startTime <- SDL.time
+
+        -- Create a behavior with the current time
+        time <- runHostFrame $ do
+            hold startTime eUpdateTime
+
+        (renderData, ballForce, jumpEvent) <- mainReflex sdlEvent time
         let sampleRenderData = runSpiderHost $ runHostFrame (sample renderData)
             sampleBallForce = runSpiderHost $ runHostFrame (sample ballForce)
-            tickCallback dt = runSpiderHost $ handleTrigger dt tickTriggerRef
-            sdlEventCallback dt = runSpiderHost $ handleTrigger dt sdlTriggerRef
+            sdlEventCallback evt = runSpiderHost $ handleTrigger evt sdlTriggerRef
+            updateTimeCallback t = runSpiderHost $ handleTrigger t eUpdateTimeTriggerRef
 
-        startTicks <- SDL.ticks
-        liftIO $ appLoop
-            sampleRenderData sampleBallForce tickCallback sdlEventCallback startTicks
+            appLoop :: Double -> IO ()
+            appLoop oldTime = do
+                newTime <- SDL.time
+                updateTimeCallback newTime
+
+                events <- SDL.pollEvents
+                let qPressed = any (isKeyPressed SDL.KeycodeQ) events
+                mapM_ sdlEventCallback events
+
+                sampleRenderData >>= render
+                currentBallForce <- sampleBallForce
+
+                H.applyOnlyForce circleBody currentBallForce (H.Vector 0 0)
+
+                let dt = newTime - oldTime
+                    spriterTimeStep = CDouble $ dt * 1000
+
+                [C.exp| void {
+                    $(EntityInstance* entityInstance)->setTimeElapsed($(double spriterTimeStep))
+                } |]
+
+                H.step space dt
+
+                unless qPressed $ appLoop newTime
+
+        liftIO $ appLoop startTime
 
     destroyImages textures
     SDL.quit

@@ -24,10 +24,10 @@ void inline_c_Main_1_952cce21cafa9a28897284fba92ab636bbe8449d(EntityInstance * e
 }
 
 extern "C" {
-void inline_c_Main_2_7c17b32410358d81e9ae240a1a61582b26982a6d(EntityInstance * entityInstance_inline_c_0, double cTimeStep_inline_c_1) {
+void inline_c_Main_2_62b474f73b9cdd3deb853f1b14dc1802206898e5(EntityInstance * entityInstance_inline_c_0, double spriterTimeStep_inline_c_1) {
 
-                entityInstance_inline_c_0->setTimeElapsed(cTimeStep_inline_c_1)
-            ;
+                    entityInstance_inline_c_0->setTimeElapsed(spriterTimeStep_inline_c_1)
+                ;
 }
 
 }
