@@ -7,13 +7,10 @@ import Control.Monad (unless)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (liftIO)
 
-import Data.Dependent.Sum (DSum ((:=>)))
-import Data.IORef (readIORef)
 import Data.Map ((!), Map)
 import qualified Data.Map as Map
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
-import Data.Word (Word32)
 
 import Foreign.C.String (CString, withCString, peekCString)
 import Foreign.C.Types (CInt, CDouble(..))
@@ -34,7 +31,13 @@ import Linear (V2(..), V4(..))
 import qualified Physics.Hipmunk as H
 
 import Reflex
-import Reflex.Host.Class (newEventWithTriggerRef, runHostFrame, fireEvents)
+import Reflex.Host.Class
+    ( newEventWithTriggerRef
+    , runHostFrame
+    , fireEventRef
+    , fireEventRefAndRead
+    , subscribeEvent
+    )
 
 import SDL (Point(P))
 import qualified SDL
@@ -185,17 +188,14 @@ mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
 mainReflex sdlEvent time = do
     let keyEvent = fmapMaybe getKeyEvent sdlEvent
         pressedKeyB key = hold False $ isPress <$> ffilter (isKey key) keyEvent
-        spacePressedE = isPress <$> ffilter (isKey SDL.KeycodeSpace) keyEvent
+        spacePressedE = ffilter (\evt -> isKey SDL.KeycodeSpace evt && isPress evt) keyEvent
 
     leftPressed <- pressedKeyB SDL.KeycodeLeft
     rightPressed <- pressedKeyB SDL.KeycodeRight
 
     startTime <- sample time
 
-    let -- vx = controlVx playerSpeed <$> aPressed <*> dPressed
-        -- dx = attachWith (*) vx tickEvent
-
-        ballAccX = controlVx 2000 <$> leftPressed <*> rightPressed
+    let ballAccX = controlVx 2000 <$> leftPressed <*> rightPressed
         ballAcc = H.Vector <$> ballAccX <*> pure 0
 
         startPlayer = Player
@@ -208,8 +208,6 @@ mainReflex sdlEvent time = do
         calcPos (Player x0 a d t0') t =
             let v = controlVx playerSpeed a d
             in x0 + (t - t0') * v
-
-    -- pos <- foldDyn (+) startPos $ fmap (`V2` 0) dx
 
     rec
         let pos = calcPos <$> currentPlayer <*> time
@@ -237,7 +235,7 @@ mainReflex sdlEvent time = do
         playerAnimFrame = (\t -> floor (t / frameTime) `mod` playerFrames) <$> time
 
         renderData = RenderData <$> posInt <*> playerAnimFrame
-        jumpEvent = 1000 <$ spacePressedE
+        jumpEvent = (-1000) <$ spacePressedE
 
     return $ (renderData, ballAcc, jumpEvent)
 
@@ -296,15 +294,6 @@ main = do
     let
         princessTexture = textures ! "princess_running.png"
 
-        handleTrigger e trigger = do
-            mETrigger <- liftIO $ readIORef trigger
-            case mETrigger of
-                Nothing ->
-                    return ()
-
-                Just eTrigger ->
-                    fireEvents [eTrigger :=> Identity e]
-
         render :: RenderData -> IO ()
         render (RenderData pos frame) = do
             SDL.clear renderer
@@ -327,19 +316,23 @@ main = do
             hold startTime eUpdateTime
 
         (renderData, ballForce, jumpEvent) <- mainReflex sdlEvent time
+        jumpHandle <- subscribeEvent jumpEvent
+
         let sampleRenderData = runSpiderHost $ runHostFrame (sample renderData)
             sampleBallForce = runSpiderHost $ runHostFrame (sample ballForce)
-            sdlEventCallback evt = runSpiderHost $ handleTrigger evt sdlTriggerRef
-            updateTimeCallback t = runSpiderHost $ handleTrigger t eUpdateTimeTriggerRef
 
             appLoop :: Double -> IO ()
             appLoop oldTime = do
                 newTime <- SDL.time
-                updateTimeCallback newTime
+                runSpiderHost $ fireEventRef eUpdateTimeTriggerRef newTime
 
                 events <- SDL.pollEvents
                 let qPressed = any (isKeyPressed SDL.KeycodeQ) events
-                mapM_ sdlEventCallback events
+                forM_ events $ \evt -> runSpiderHost $ do
+                    mJump <- fireEventRefAndRead sdlTriggerRef evt jumpHandle
+                    case mJump of
+                        Nothing -> return ()
+                        Just imp -> liftIO $ H.applyImpulse circleBody (H.Vector 0 imp) (H.Vector 0 0)
 
                 sampleRenderData >>= render
                 currentBallForce <- sampleBallForce
