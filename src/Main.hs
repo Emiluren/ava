@@ -84,7 +84,10 @@ initSDL :: IO SDL.Renderer
 initSDL = do
     SDL.initializeAll
 
-    let windowSettings = SDL.defaultWindow { SDL.windowInitialSize = winSize }
+    let windowSettings = SDL.defaultWindow
+            { SDL.windowInitialSize = winSize
+            , SDL.windowResizable = True
+            }
     window <- SDL.createWindow "Ava" windowSettings
     renderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
     SDL.rendererDrawColor renderer $= V4 50 50 50 255
@@ -213,7 +216,7 @@ mainReflex sdlEvent time = do
         playerAnimFrame = (\t -> floor (t / frameTime) `mod` playerFrames) <$> time
 
         renderData = RenderData <$> posInt <*> playerAnimFrame
-        jumpEvent = (-1000) <$ spacePressedE
+        jumpEvent = (-2000) <$ spacePressedE
 
     return $ (renderData, ballAcc, jumpEvent)
 
@@ -276,10 +279,13 @@ main = do
         corners = [tl, bl, br, tr]
         edges = zip corners $ tail corners ++ [head corners]
 
-    forM_ edges $ \(start, end) -> do
-        w <- H.newShape wall (H.LineSegment start end 1) (H.Vector 0 0)
+    wallShapes <- forM edges $ \(start, end) -> do
+        let wst = H.LineSegment start end 1
+        w <- H.newShape wall wst (H.Vector 0 0)
         H.friction w $= 1.0
+        H.elasticity w $= 0.6
         H.spaceAdd space $ H.Static w
+        return (w, wst)
 
     let circleMoment = H.momentForCircle circleMass (0, circleRadius) (H.Vector 0 0)
 
@@ -289,6 +295,7 @@ main = do
     let circleShapeType = H.Circle circleRadius
     circleShape <- H.newShape circleBody circleShapeType (H.Vector 0 0)
     H.friction circleShape $= 1.0
+    H.elasticity circleShape $= 0.9
     H.spaceAdd space circleShape
     H.position circleBody $= H.Vector 200 20
 
@@ -297,12 +304,16 @@ main = do
 
         render :: RenderData -> IO ()
         render (RenderData pos frame) = do
+            SDL.rendererDrawColor renderer $= V4 0 0 0 255
             SDL.clear renderer
 
             renderToPos renderer princessTexture pos frame
             Spriter.renderEntityInstance entityInstance
             renderShape renderer shelf shelfShapeType
             renderShape renderer circleShape circleShapeType
+
+            forM_ wallShapes $ \(shape, shapeType) -> do
+                renderShape renderer shape shapeType
 
             SDL.present renderer
 
