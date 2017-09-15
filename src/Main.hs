@@ -2,10 +2,11 @@
 module Main where
 
 import Control.Lens ((^.))
-import Control.Monad (unless)
+import Control.Monad (unless, replicateM_)
 import Control.Monad.Identity
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 
+import Data.Fixed (div')
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Map ((!), Map)
 import qualified Data.Map as Map
@@ -44,11 +45,6 @@ import qualified SDL.Primitive as SDL
 
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
-
-data RenderData = RenderData
-    { playerPos :: V2 CInt
-    , animFrame :: Int
-    }
 
 winWidth, winHeight :: Num a => a
 winWidth = 800
@@ -103,18 +99,18 @@ loadImages renderer files =
 destroyImages :: Map String SDL.Texture -> IO ()
 destroyImages = mapM_ SDL.destroyTexture
 
-textureSize :: SDL.Texture -> IO (V2 CInt)
+textureSize :: MonadIO m => SDL.Texture -> m (V2 CInt)
 textureSize texture = do
     info <- SDL.queryTexture texture
     return $ V2 (SDL.textureWidth info) (SDL.textureHeight info)
 
-renderToPos :: SDL.Renderer -> SDL.Texture -> V2 CInt -> Int -> IO ()
+renderToPos :: MonadIO m => SDL.Renderer -> SDL.Texture -> SDL.Point V2 CInt -> Int -> m ()
 renderToPos renderer texture pos frame = do
     _texSize <- textureSize texture
     let
         frameOffset = fromIntegral $ frame * 32
         sourceRect = Just $ SDL.Rectangle (P $ V2 frameOffset 0) (V2 32 32)
-        destRect = Just $ SDL.Rectangle (P pos) (V2 64 64)
+        destRect = Just $ SDL.Rectangle pos (V2 64 64)
 
     SDL.copy renderer texture sourceRect destRect
 
@@ -158,17 +154,17 @@ frameTime = 0.05
 playerFrames :: Int
 playerFrames = 10
 
-data Player = Player
-    { startX :: Double
-    , aPressed :: Bool
-    , dPressed :: Bool
-    , t0 :: Double
+data LogicOutput t = LogicOutput
+    { playerForce :: Behavior t H.Vector
+    , playerFrame :: Behavior t Int
+    , ballForce :: Behavior t H.Vector
+    , ballYImpulse :: Event t Double
     }
 
 mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
            => Event t SDL.Event
            -> Behavior t Double
-           -> m (Behavior t RenderData, Behavior t H.Vector, Event t Double)
+           -> m (LogicOutput t)
 mainReflex sdlEvent time = do
     let keyEvent = fmapMaybe getKeyEvent sdlEvent
         pressedKeyB key = hold False $ isPress <$> ffilter (isKey key) keyEvent
@@ -176,49 +172,24 @@ mainReflex sdlEvent time = do
 
     leftPressed <- pressedKeyB SDL.KeycodeLeft
     rightPressed <- pressedKeyB SDL.KeycodeRight
-
-    startTime <- sample time
+    aPressed <- pressedKeyB SDL.KeycodeA
+    dPressed <- pressedKeyB SDL.KeycodeD
 
     let ballAccX = controlVx 2000 <$> leftPressed <*> rightPressed
         ballAcc = H.Vector <$> ballAccX <*> pure 0
 
-        startPlayer = Player
-            { startX = 10
-            , aPressed = False
-            , dPressed = False
-            , t0 = startTime
-            }
-
-        calcPos (Player x0 a d t0') t =
-            let v = controlVx playerSpeed a d
-            in x0 + (t - t0') * v
-
-    rec
-        let pos = calcPos <$> currentPlayer <*> time
-
-            newPlayer :: SDL.KeyboardEventData -> PushM t (Maybe Player)
-            newPlayer sdlE = do
-                player <- sample currentPlayer
-                t <- sample time
-                let p = calcPos player t
-                    player' = player { startX = p, t0 = t }
-                case eventKeycode sdlE of
-                    SDL.KeycodeA -> do
-                        return $ Just $ player' { aPressed = isPress sdlE }
-                    SDL.KeycodeD -> do
-                        return $ Just $ player' { dPressed = isPress sdlE }
-                    _ ->
-                        return Nothing
-
-        currentPlayer <- hold startPlayer $ push newPlayer keyEvent
-
-    let posInt = V2 <$> (floor <$> pos) <*> pure 400
+        playerAccX = controlVx 4000 <$> aPressed <*> dPressed
+        playerAcc = H.Vector <$> playerAccX <*> pure 0
         playerAnimFrame = (\t -> floor (t / frameTime) `mod` playerFrames) <$> time
 
-        renderData = RenderData <$> posInt <*> playerAnimFrame
         jumpEvent = (-2000) <$ spacePressedE
 
-    return $ (renderData, ballAcc, jumpEvent)
+    return $ LogicOutput
+        { playerForce = playerAcc
+        , playerFrame = playerAnimFrame
+        , ballForce = ballAcc
+        , ballYImpulse = jumpEvent
+        }
 
 main :: IO ()
 main = do
@@ -299,21 +270,45 @@ main = do
     H.spaceAdd space circleShape
     H.position circleBody $= H.Vector 200 20
 
+    let makePlayer w h =
+            [ H.Vector (-w * 0.3) 0
+            , H.Vector (-w * 0.5) (-h * 0.2)
+            , H.Vector (-w * 0.5) (-h * 0.8)
+            , H.Vector (-w * 0.3) (-h)
+            , H.Vector (w * 0.3) (-h)
+            , H.Vector (w * 0.5) (-h * 0.8)
+            , H.Vector (w * 0.5) (-h * 0.2)
+            , H.Vector (w * 0.3) 0
+            ]
+        playerWidth = 16
+        playerHeight = 64
+        playerShapeType = H.Polygon $ reverse $ makePlayer playerWidth playerHeight
+        playerMass = 5
+    playerBody <- H.newBody playerMass $ H.infinity --H.momentForShape playerMass playerShapeType (H.Vector 0 0)
+    H.spaceAdd space playerBody
+    playerShape <- H.newShape playerBody playerShapeType (H.Vector 0 0)
+    H.spaceAdd space playerShape
+    H.friction playerShape $= 1.0
+    H.position playerBody $= H.Vector 200 50
+    H.maxVelocity playerBody $= playerSpeed
+
     let
         princessTexture = textures ! "princess_running.png"
 
-        render :: RenderData -> IO ()
-        render (RenderData pos frame) = do
+        render :: MonadIO m => SDL.Point V2 CInt -> Int -> m ()
+        render pos frame = do
             SDL.rendererDrawColor renderer $= V4 0 0 0 255
             SDL.clear renderer
 
-            renderToPos renderer princessTexture pos frame
-            Spriter.renderEntityInstance entityInstance
+            renderToPos renderer princessTexture (pos - (SDL.P $ V2 32 64)) frame
+            liftIO $ Spriter.renderEntityInstance entityInstance
             renderShape renderer shelf shelfShapeType
             renderShape renderer circleShape circleShapeType
 
             forM_ wallShapes $ \(shape, shapeType) -> do
                 renderShape renderer shape shapeType
+
+            renderShape renderer playerShape playerShapeType
 
             SDL.present renderer
 
@@ -327,40 +322,42 @@ main = do
         time <- runHostFrame $ do
             hold startTime eUpdateTime
 
-        (renderData, ballForce, jumpEvent) <- mainReflex sdlEvent time
-        jumpHandle <- subscribeEvent jumpEvent
+        (logicOutput) <- mainReflex sdlEvent time
+        jumpHandle <- subscribeEvent $ ballYImpulse logicOutput
 
-        let sampleRenderData = runSpiderHost $ runHostFrame (sample renderData)
-            sampleBallForce = runSpiderHost $ runHostFrame (sample ballForce)
-
-            appLoop :: Double -> IO ()
-            appLoop oldTime = do
+        let appLoop :: Double -> Double -> SpiderHost Global ()
+            appLoop oldTime acc = do
                 newTime <- SDL.time
-                runSpiderHost $ fireEventRef eUpdateTimeTriggerRef newTime
+                let dt = min (newTime - oldTime) 0.25
+                    acc' = acc + dt
+                    stepsToRun = acc' `div'` timeStep
+
+                liftIO $ replicateM_ stepsToRun $ H.step space timeStep
+                fireEventRef eUpdateTimeTriggerRef newTime
 
                 events <- SDL.pollEvents
-                let qPressed = any (isKeyPressed SDL.KeycodeQ) events
-                forM_ events $ \evt -> runSpiderHost $ do
+                forM_ events $ \evt -> do
                     mJump <- fireEventRefAndRead sdlTriggerRef evt jumpHandle
                     case mJump of
                         Nothing -> return ()
                         Just imp -> liftIO $ H.applyImpulse circleBody (H.Vector 0 imp) (H.Vector 0 0)
 
-                sampleRenderData >>= render
-                currentBallForce <- sampleBallForce
+                currentPlayerForce <- sample $ playerForce logicOutput
+                currentBallForce <- sample $ ballForce logicOutput
+                liftIO $ H.applyOnlyForce playerBody currentPlayerForce (H.Vector 0 0)
+                liftIO $ H.applyOnlyForce circleBody currentBallForce (H.Vector 0 0)
 
-                H.applyOnlyForce circleBody currentBallForce (H.Vector 0 0)
+                let spriterTimeStep = CDouble $ dt * 1000
+                liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
 
-                let dt = newTime - oldTime
-                    spriterTimeStep = CDouble $ dt * 1000
+                currentPlayerFrame <- sample $ playerFrame logicOutput
+                playerPos <- get $ H.position playerBody
+                render (convV playerPos) currentPlayerFrame
 
-                Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
+                let qPressed = any (isKeyPressed SDL.KeycodeQ) events
+                unless qPressed $ appLoop newTime $ acc' - (fromIntegral stepsToRun) * timeStep
 
-                H.step space dt
-
-                unless qPressed $ appLoop newTime
-
-        liftIO $ appLoop startTime
+        appLoop startTime 0.0
 
     destroyImages textures
 
@@ -405,7 +402,7 @@ renderSprite renderer spritePtr spriteStatePtr = do
 convV :: H.Vector -> SDL.Point V2 CInt
 convV (H.Vector x y) = SDL.P $ V2 (floor x) (floor y)
 
-renderShape :: SDL.Renderer -> H.Shape -> H.ShapeType -> IO ()
+renderShape :: MonadIO m => SDL.Renderer -> H.Shape -> H.ShapeType -> m ()
 renderShape renderer shape (H.Circle radius) = do
     H.Vector px py <- get $ H.position $ H.body shape
     angle <- get $ H.angle $ H.body shape
