@@ -142,7 +142,7 @@ isKeyPressed key event =
             False
 
 playerSpeed :: Double
-playerSpeed = 5.0 * 100
+playerSpeed = 500
 
 controlVx :: Num a => a -> Bool -> Bool -> a
 controlVx x True False = -x
@@ -159,7 +159,8 @@ playerFeetCollisionType :: Word32
 playerFeetCollisionType = 1
 
 data LogicOutput t = LogicOutput
-    { playerAcc :: Behavior t H.Vector
+    { playerSurfaceVel :: Behavior t H.Vector
+    , playerForce :: Behavior t H.Vector
     , playerFrame :: Behavior t Int
     , playerYImpulse :: Event t Double
     }
@@ -180,13 +181,17 @@ mainReflex sdlEvent time ePlayerTouchGround = do
     playerOnGround <- hold False ePlayerTouchGround
 
     let playerAccX = controlVx playerSpeed <$> aPressed <*> dPressed
+        playerAirForce = controlVx 1000 <$> aPressed <*> dPressed
         acc = H.Vector <$> playerAccX <*> pure 0
         playerAnimFrame = (\t -> floor (t / frameTime) `mod` playerFrames) <$> time
 
         jumpEvent = (-1500) <$ gate playerOnGround spacePressedE
+        pickFirst True x _ = x
+        pickFirst False _ x = x
 
     return $ LogicOutput
-        { playerAcc = acc
+        { playerSurfaceVel = pickFirst <$> playerOnGround <*> acc <*> (pure $ H.Vector 0 0)
+        , playerForce = pickFirst <$> playerOnGround <*> (pure $ H.Vector 0 0) <*> playerAirForce
         , playerFrame = playerAnimFrame
         , playerYImpulse = jumpEvent
         }
@@ -284,6 +289,7 @@ main = do
         playerBodyShapeType = H.Polygon $ reverse $ makePlayerBody playerWidth playerHeight
         playerMass = 5
     playerBody <- H.newBody playerMass $ H.infinity
+    H.maxVelocity playerBody $= playerSpeed
     H.spaceAdd space playerBody
     playerFeetShape <- H.newShape playerBody playerFeetShapeType (H.Vector 0 0)
     playerBodyShape <- H.newShape playerBody playerBodyShapeType (H.Vector 0 0)
@@ -362,8 +368,10 @@ main = do
                         Nothing -> return ()
                         Just imp -> liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
 
-                currentPlayerAcc <- runHostFrame $ sample $ playerAcc logicOutput
-                H.surfaceVel playerFeetShape $= H.scale currentPlayerAcc (-1)
+                currentPlayerSurfaceVel <- runHostFrame $ sample $ playerSurfaceVel logicOutput
+                currentPlayerForce <- runHostFrame $ sample $ playerForce logicOutput
+                H.surfaceVel playerFeetShape $= H.scale currentPlayerSurfaceVel (-1)
+                liftIO $ H.applyOnlyForce playerBody currentPlayerForce (H.Vector 0 0)
 
                 let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
