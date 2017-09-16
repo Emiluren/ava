@@ -155,10 +155,9 @@ playerFrames :: Int
 playerFrames = 10
 
 data LogicOutput t = LogicOutput
-    { playerForce :: Behavior t H.Vector
+    { playerAcc :: Behavior t H.Vector
     , playerFrame :: Behavior t Int
-    , ballForce :: Behavior t H.Vector
-    , ballYImpulse :: Event t Double
+    , playerYImpulse :: Event t Double
     }
 
 mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
@@ -170,25 +169,19 @@ mainReflex sdlEvent time = do
         pressedKeyB key = hold False $ isPress <$> ffilter (isKey key) keyEvent
         spacePressedE = ffilter (\evt -> isKey SDL.KeycodeSpace evt && isPress evt) keyEvent
 
-    leftPressed <- pressedKeyB SDL.KeycodeLeft
-    rightPressed <- pressedKeyB SDL.KeycodeRight
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
 
-    let ballAccX = controlVx 2000 <$> leftPressed <*> rightPressed
-        ballAcc = H.Vector <$> ballAccX <*> pure 0
-
-        playerAccX = controlVx 4000 <$> aPressed <*> dPressed
+    let playerAccX = controlVx playerSpeed <$> aPressed <*> dPressed
         playerAcc = H.Vector <$> playerAccX <*> pure 0
         playerAnimFrame = (\t -> floor (t / frameTime) `mod` playerFrames) <$> time
 
-        jumpEvent = (-2000) <$ spacePressedE
+        jumpEvent = (-1500) <$ spacePressedE
 
     return $ LogicOutput
-        { playerForce = playerAcc
+        { playerAcc = playerAcc
         , playerFrame = playerAnimFrame
-        , ballForce = ballAcc
-        , ballYImpulse = jumpEvent
+        , playerYImpulse = jumpEvent
         }
 
 main :: IO ()
@@ -231,7 +224,7 @@ main = do
 
     putStrLn "Creating chipmunk space"
     space <- H.newSpace
-    H.gravity space $= H.Vector 0 (200)
+    H.gravity space $= H.Vector 0 (400)
 
     wall <- H.newBody H.infinity H.infinity
     H.position wall $= H.Vector 0 0
@@ -270,25 +263,27 @@ main = do
     H.spaceAdd space circleShape
     H.position circleBody $= H.Vector 200 20
 
-    let makePlayer w h =
-            [ H.Vector (-w * 0.3) 0
-            , H.Vector (-w * 0.5) (-h * 0.2)
+    let makePlayerBody w h =
+            [ H.Vector (-w * 0.5) (-h * 0.2)
             , H.Vector (-w * 0.5) (-h * 0.8)
             , H.Vector (-w * 0.3) (-h)
             , H.Vector (w * 0.3) (-h)
             , H.Vector (w * 0.5) (-h * 0.8)
             , H.Vector (w * 0.5) (-h * 0.2)
-            , H.Vector (w * 0.3) 0
             ]
         playerWidth = 16
         playerHeight = 64
-        playerShapeType = H.Polygon $ reverse $ makePlayer playerWidth playerHeight
+        playerFeetShapeType = H.Circle $ playerWidth * 0.4
+        playerBodyShapeType = H.Polygon $ reverse $ makePlayerBody playerWidth playerHeight
         playerMass = 5
-    playerBody <- H.newBody playerMass $ H.infinity --H.momentForShape playerMass playerShapeType (H.Vector 0 0)
+    playerBody <- H.newBody playerMass $ H.infinity
     H.spaceAdd space playerBody
-    playerShape <- H.newShape playerBody playerShapeType (H.Vector 0 0)
-    H.spaceAdd space playerShape
-    H.friction playerShape $= 1.0
+    playerFeetShape <- H.newShape playerBody playerFeetShapeType (H.Vector 0 0)
+    playerBodyShape <- H.newShape playerBody playerBodyShapeType (H.Vector 0 0)
+    H.spaceAdd space playerFeetShape
+    H.spaceAdd space playerBodyShape
+    H.friction playerFeetShape $= 2
+    H.friction playerBodyShape $= 0
     H.position playerBody $= H.Vector 200 50
     H.maxVelocity playerBody $= playerSpeed
 
@@ -308,7 +303,8 @@ main = do
             forM_ wallShapes $ \(shape, shapeType) -> do
                 renderShape renderer shape shapeType
 
-            renderShape renderer playerShape playerShapeType
+            renderShape renderer playerFeetShape playerFeetShapeType
+            renderShape renderer playerBodyShape playerBodyShapeType
 
             SDL.present renderer
 
@@ -323,7 +319,7 @@ main = do
             hold startTime eUpdateTime
 
         (logicOutput) <- mainReflex sdlEvent time
-        jumpHandle <- subscribeEvent $ ballYImpulse logicOutput
+        jumpHandle <- subscribeEvent $ playerYImpulse logicOutput
 
         let appLoop :: Double -> Double -> SpiderHost Global ()
             appLoop oldTime acc = do
@@ -340,12 +336,10 @@ main = do
                     mJump <- fireEventRefAndRead sdlTriggerRef evt jumpHandle
                     case mJump of
                         Nothing -> return ()
-                        Just imp -> liftIO $ H.applyImpulse circleBody (H.Vector 0 imp) (H.Vector 0 0)
+                        Just imp -> liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
 
-                currentPlayerForce <- sample $ playerForce logicOutput
-                currentBallForce <- sample $ ballForce logicOutput
-                liftIO $ H.applyOnlyForce playerBody currentPlayerForce (H.Vector 0 0)
-                liftIO $ H.applyOnlyForce circleBody currentBallForce (H.Vector 0 0)
+                currentPlayerAcc <- sample $ playerAcc logicOutput
+                H.surfaceVel playerFeetShape $= H.scale currentPlayerAcc (-1)
 
                 let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
@@ -407,10 +401,10 @@ renderShape renderer shape (H.Circle radius) = do
     H.Vector px py <- get $ H.position $ H.body shape
     angle <- get $ H.angle $ H.body shape
 
+    SDL.rendererDrawColor renderer $= V4 255 255 255 255
     let sdlPos = V2 (floor px) (floor py)
-    SDL.fillCircle renderer sdlPos (floor radius) (V4 255 255 255 255)
+    SDL.circle renderer sdlPos (floor radius) (V4 255 255 255 255)
 
-    SDL.rendererDrawColor renderer $= V4 100 100 100 255
     let edgePoint = SDL.P $ sdlPos + V2
             (floor $ cos angle * radius)
             (floor $ sin angle * radius)
