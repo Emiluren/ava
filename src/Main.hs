@@ -163,6 +163,7 @@ data LogicOutput t = LogicOutput
     , playerForce :: Behavior t H.Vector
     , playerFrame :: Behavior t Int
     , playerYImpulse :: Event t Double
+    , debugRenderingEnabled :: Behavior t Bool
     }
 
 mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
@@ -174,11 +175,14 @@ mainReflex sdlEvent time ePlayerTouchGround = do
     let keyEvent = fmapMaybe getKeyEvent sdlEvent
         pressedKeyB key = hold False $ isPress <$> ffilter (isKey key) keyEvent
         spacePressedE = ffilter (\evt -> isKey SDL.KeycodeSpace evt && isPress evt) keyEvent
+        f1PressedE = ffilter (\evt -> isKey SDL.KeycodeF1 evt && isPress evt) keyEvent
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
 
     playerOnGround <- hold False ePlayerTouchGround
+    eDebugRendering <- mapAccum_ (\dr _ -> (not dr, not dr)) True f1PressedE
+    debugRendering <- hold True eDebugRendering
 
     let playerAccX = controlVx playerSpeed <$> aPressed <*> dPressed
         playerAirForce = controlVx 1000 <$> aPressed <*> dPressed
@@ -194,6 +198,7 @@ mainReflex sdlEvent time ePlayerTouchGround = do
         , playerForce = pickFirst <$> playerOnGround <*> (pure $ H.Vector 0 0) <*> playerAirForce
         , playerFrame = playerAnimFrame
         , playerYImpulse = jumpEvent
+        , debugRenderingEnabled = debugRendering
         }
 
 main :: IO ()
@@ -282,9 +287,11 @@ main = do
             , H.Vector (w * 0.3) (-h)
             , H.Vector (w * 0.5) (-h * 0.8)
             , H.Vector (w * 0.5) (-h * 0.2)
+            , H.Vector (w * 0.3) (-h * 0.1)
+            , H.Vector (-w * 0.3) (-h * 0.1)
             ]
         playerWidth = 16
-        playerHeight = 64
+        playerHeight = 56
         playerFeetShapeType = H.Circle $ playerWidth * 0.4
         playerBodyShapeType = H.Polygon $ reverse $ makePlayerBody playerWidth playerHeight
         playerMass = 5
@@ -303,21 +310,23 @@ main = do
     let
         princessTexture = textures ! "princess_running.png"
 
-        render :: MonadIO m => SDL.Point V2 CInt -> Int -> m ()
-        render pos frame = do
+        render :: MonadIO m => SDL.Point V2 CInt -> Int -> Bool -> m ()
+        render pos frame debugRendering = do
             SDL.rendererDrawColor renderer $= V4 0 0 0 255
             SDL.clear renderer
 
             renderToPos renderer princessTexture (pos - (SDL.P $ V2 32 64)) frame
             liftIO $ Spriter.renderEntityInstance entityInstance
-            renderShape renderer shelf shelfShapeType
-            renderShape renderer circleShape circleShapeType
 
-            forM_ wallShapes $ \(shape, shapeType) -> do
-                renderShape renderer shape shapeType
+            when debugRendering $ do
+                renderShape renderer shelf shelfShapeType
+                renderShape renderer circleShape circleShapeType
 
-            renderShape renderer playerFeetShape playerFeetShapeType
-            renderShape renderer playerBodyShape playerBodyShapeType
+                forM_ wallShapes $ \(shape, shapeType) -> do
+                    renderShape renderer shape shapeType
+
+                renderShape renderer playerFeetShape playerFeetShapeType
+                renderShape renderer playerBodyShape playerBodyShapeType
 
             SDL.present renderer
 
@@ -377,8 +386,9 @@ main = do
                 liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
 
                 currentPlayerFrame <- runHostFrame $ sample $ playerFrame logicOutput
+                isDebugRenderingEnabled <- runHostFrame $ sample $ debugRenderingEnabled logicOutput
                 playerPos <- get $ H.position playerBody
-                render (convV playerPos) currentPlayerFrame
+                render (convV playerPos) currentPlayerFrame isDebugRenderingEnabled
 
                 let qPressed = any (isKeyPressed SDL.KeycodeQ) events
                 unless qPressed $ appLoop newTime $ acc' - (fromIntegral stepsToRun) * timeStep
