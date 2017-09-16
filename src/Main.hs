@@ -11,6 +11,7 @@ import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Map ((!), Map)
 import qualified Data.Map as Map
 import Data.StateVar (($=), get)
+import Data.Word (Word32)
 
 import Foreign.C.String (CString, withCString, peekCString)
 import Foreign.C.Types (CInt, CDouble(..))
@@ -154,6 +155,9 @@ frameTime = 0.05
 playerFrames :: Int
 playerFrames = 10
 
+playerFeetCollisionType :: Word32
+playerFeetCollisionType = 1
+
 data LogicOutput t = LogicOutput
     { playerAcc :: Behavior t H.Vector
     , playerFrame :: Behavior t Int
@@ -163,8 +167,9 @@ data LogicOutput t = LogicOutput
 mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
            => Event t SDL.Event
            -> Behavior t Double
+           -> Event t Bool
            -> m (LogicOutput t)
-mainReflex sdlEvent time = do
+mainReflex sdlEvent time ePlayerTouchGround = do
     let keyEvent = fmapMaybe getKeyEvent sdlEvent
         pressedKeyB key = hold False $ isPress <$> ffilter (isKey key) keyEvent
         spacePressedE = ffilter (\evt -> isKey SDL.KeycodeSpace evt && isPress evt) keyEvent
@@ -172,14 +177,16 @@ mainReflex sdlEvent time = do
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
 
+    playerOnGround <- hold False ePlayerTouchGround
+
     let playerAccX = controlVx playerSpeed <$> aPressed <*> dPressed
-        playerAcc = H.Vector <$> playerAccX <*> pure 0
+        acc = H.Vector <$> playerAccX <*> pure 0
         playerAnimFrame = (\t -> floor (t / frameTime) `mod` playerFrames) <$> time
 
-        jumpEvent = (-1500) <$ spacePressedE
+        jumpEvent = (-1500) <$ gate playerOnGround spacePressedE
 
     return $ LogicOutput
-        { playerAcc = playerAcc
+        { playerAcc = acc
         , playerFrame = playerAnimFrame
         , playerYImpulse = jumpEvent
         }
@@ -285,7 +292,7 @@ main = do
     H.friction playerFeetShape $= 2
     H.friction playerBodyShape $= 0
     H.position playerBody $= H.Vector 200 50
-    H.maxVelocity playerBody $= playerSpeed
+    H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
         princessTexture = textures ! "princess_running.png"
@@ -311,15 +318,32 @@ main = do
     runSpiderHost $ do
         (sdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
         (eUpdateTime, eUpdateTimeTriggerRef) <- newEventWithTriggerRef
+        (ePlayerGroundCollision, ePlayerGroundCollisionRef) <- newEventWithTriggerRef
 
         startTime <- SDL.time
 
         -- Create a behavior with the current time
-        time <- runHostFrame $ do
-            hold startTime eUpdateTime
+        time <- runHostFrame $ hold startTime eUpdateTime
 
-        (logicOutput) <- mainReflex sdlEvent time
+        (logicOutput) <- mainReflex sdlEvent time ePlayerGroundCollision
         jumpHandle <- subscribeEvent $ playerYImpulse logicOutput
+
+        let playerTouchGroundCallback = do
+                liftIO $ runSpiderHost $ fireEventRef ePlayerGroundCollisionRef True
+                return True
+
+            playerLeaveGroundCallback = do
+                liftIO $ runSpiderHost $ fireEventRef ePlayerGroundCollisionRef False
+                return ()
+
+            playerGroundCollisionHandler = H.Handler
+                { H.beginHandler = Just playerTouchGroundCallback
+                , H.preSolveHandler = Nothing
+                , H.postSolveHandler = Nothing
+                , H.separateHandler = Just playerLeaveGroundCallback
+                }
+
+        liftIO $ H.addCollisionHandler space 0 playerFeetCollisionType playerGroundCollisionHandler
 
         let appLoop :: Double -> Double -> SpiderHost Global ()
             appLoop oldTime acc = do
@@ -338,13 +362,13 @@ main = do
                         Nothing -> return ()
                         Just imp -> liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
 
-                currentPlayerAcc <- sample $ playerAcc logicOutput
+                currentPlayerAcc <- runHostFrame $ sample $ playerAcc logicOutput
                 H.surfaceVel playerFeetShape $= H.scale currentPlayerAcc (-1)
 
                 let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
 
-                currentPlayerFrame <- sample $ playerFrame logicOutput
+                currentPlayerFrame <- runHostFrame $ sample $ playerFrame logicOutput
                 playerPos <- get $ H.position playerBody
                 render (convV playerPos) currentPlayerFrame
 
