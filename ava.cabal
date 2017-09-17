@@ -27,6 +27,8 @@ executable ava
   build-depends:       base >= 4.7 && < 5
                      , containers >= 0.5
                      , dependent-sum
+                     , dependent-sum-template
+                     , dependent-map
                      , Hipmunk
                      , inline-c
                      , inline-c-cpp

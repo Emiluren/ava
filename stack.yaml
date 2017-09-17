@@ -7,7 +7,8 @@ packages:
     commit: 0ff348332fc05521172fb44cef67ece8926c3937
   extra-dep: true
 extra-deps:
+- Hipmunk-5.2.0.17
+- dependent-sum-template-0.0.0.6
 - prim-uniq-0.1.0.1
 - ref-tf-0.4.0.1
-- Hipmunk-5.2.0.17
 resolver: lts-9.4

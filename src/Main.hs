@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables, GADTs, TemplateHaskell #-}
 module Main where
 
 import Control.Lens ((^.))
@@ -6,7 +6,11 @@ import Control.Monad (unless, replicateM_)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (MonadIO, liftIO)
 
+import Data.Dependent.Map (DMap)
+import qualified Data.Dependent.Map as DMap
+import Data.Dependent.Sum ((==>))
 import Data.Fixed (div')
+import Data.GADT.Compare.TH
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Map ((!), Map)
 import qualified Data.Map as Map
@@ -125,14 +129,6 @@ eventKeycode = SDL.keysymKeycode . SDL.keyboardEventKeysym
 isKey :: SDL.Keycode -> SDL.KeyboardEventData -> Bool
 isKey keycode = (== keycode) . eventKeycode
 
-getKeyEvent :: SDL.Event -> Maybe SDL.KeyboardEventData
-getKeyEvent event =
-    case SDL.eventPayload event of
-        SDL.KeyboardEvent keyboardEvent ->
-            Just keyboardEvent
-        _ ->
-            Nothing
-
 isKeyPressed :: SDL.Keycode -> SDL.Event -> Bool
 isKeyPressed key event =
     case SDL.eventPayload event of
@@ -166,16 +162,32 @@ data LogicOutput t = LogicOutput
     , debugRenderingEnabled :: Behavior t Bool
     }
 
+data SdlEventTag a where
+    KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
+    OtherEvent :: SdlEventTag SDL.Event
+
+sortEvent :: SDL.Event -> DMap SdlEventTag Identity
+sortEvent event =
+    case SDL.eventPayload event of
+        SDL.KeyboardEvent keyboardEvent ->
+            DMap.fromList [(KeyEvent $ eventKeycode keyboardEvent) ==> keyboardEvent]
+        _ ->
+            DMap.fromList [OtherEvent ==> event]
+
+deriveGEq ''SdlEventTag
+deriveGCompare ''SdlEventTag
+
 mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
-           => Event t SDL.Event
+           => EventSelector t SdlEventTag
            -> Behavior t Double
            -> Event t Bool
            -> m (LogicOutput t)
 mainReflex sdlEvent time ePlayerTouchGround = do
-    let keyEvent = fmapMaybe getKeyEvent sdlEvent
-        pressedKeyB key = hold False $ isPress <$> ffilter (isKey key) keyEvent
-        spacePressedE = ffilter (\evt -> isKey SDL.KeycodeSpace evt && isPress evt) keyEvent
-        f1PressedE = ffilter (\evt -> isKey SDL.KeycodeF1 evt && isPress evt) keyEvent
+    let pressedKeyB key = hold False $ isPress <$> select sdlEvent (KeyEvent key)
+        spacePressedE = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeSpace)
+        f1PressedE = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeF1)
+
+    -- let sdlEventFanout = fan sdlEvent
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
@@ -340,7 +352,7 @@ main = do
         -- Create a behavior with the current time
         time <- runHostFrame $ hold startTime eUpdateTime
 
-        (logicOutput) <- mainReflex sdlEvent time ePlayerGroundCollision
+        (logicOutput) <- mainReflex (fan sdlEvent) time ePlayerGroundCollision
         jumpHandle <- subscribeEvent $ playerYImpulse logicOutput
 
         let playerTouchGroundCallback = do
@@ -372,7 +384,7 @@ main = do
 
                 events <- SDL.pollEvents
                 forM_ events $ \evt -> do
-                    mJump <- fireEventRefAndRead sdlTriggerRef evt jumpHandle
+                    mJump <- fireEventRefAndRead sdlTriggerRef (sortEvent evt) jumpHandle
                     case mJump of
                         Nothing -> return ()
                         Just imp -> liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
