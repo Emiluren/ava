@@ -170,7 +170,7 @@ sortEvent :: SDL.Event -> DMap SdlEventTag Identity
 sortEvent event =
     case SDL.eventPayload event of
         SDL.KeyboardEvent keyboardEvent ->
-            DMap.fromList [(KeyEvent $ eventKeycode keyboardEvent) ==> keyboardEvent]
+            DMap.fromList [KeyEvent (eventKeycode keyboardEvent) ==> keyboardEvent]
         _ ->
             DMap.fromList [OtherEvent ==> event]
 
@@ -186,8 +186,6 @@ mainReflex sdlEvent time ePlayerTouchGround = do
     let pressedKeyB key = hold False $ isPress <$> select sdlEvent (KeyEvent key)
         spacePressedE = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeSpace)
         f1PressedE = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeF1)
-
-    -- let sdlEventFanout = fan sdlEvent
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
@@ -205,9 +203,9 @@ mainReflex sdlEvent time ePlayerTouchGround = do
         pickFirst True x _ = x
         pickFirst False _ x = x
 
-    return $ LogicOutput
-        { playerSurfaceVel = pickFirst <$> playerOnGround <*> acc <*> (pure $ H.Vector 0 0)
-        , playerForce = pickFirst <$> playerOnGround <*> (pure $ H.Vector 0 0) <*> playerAirForce
+    return LogicOutput
+        { playerSurfaceVel = pickFirst <$> playerOnGround <*> acc <*> pure (H.Vector 0 0)
+        , playerForce = pickFirst <$> playerOnGround <*> pure (H.Vector 0 0) <*> playerAirForce
         , playerFrame = playerAnimFrame
         , playerYImpulse = jumpEvent
         , debugRenderingEnabled = debugRendering
@@ -224,7 +222,7 @@ main = do
         loadImage filename pivotX pivotY = do
             name <- peekCString filename
 
-            tex <- SDL.Image.loadTexture renderer $ name
+            tex <- SDL.Image.loadTexture renderer name
             putStrLn $ "Loaded " ++ name
 
             let sprite = Spriter.Sprite
@@ -239,7 +237,7 @@ main = do
             modifyIORef' loadedImages (stablePtr:)
             return $ castPtr $ castStablePtrToPtr stablePtr
 
-    imgloader <- Spriter.makeImageLoader $ loadImage
+    imgloader <- Spriter.makeImageLoader loadImage
     renderf <- Spriter.makeRenderer $ renderSprite renderer
 
     Spriter.setErrorFunction
@@ -253,7 +251,7 @@ main = do
 
     putStrLn "Creating chipmunk space"
     space <- H.newSpace
-    H.gravity space $= H.Vector 0 (400)
+    H.gravity space $= H.Vector 0 400
 
     wall <- H.newBody H.infinity H.infinity
     H.position wall $= H.Vector 0 0
@@ -307,7 +305,7 @@ main = do
         playerFeetShapeType = H.Circle $ playerWidth * 0.4
         playerBodyShapeType = H.Polygon $ reverse $ makePlayerBody playerWidth playerHeight
         playerMass = 5
-    playerBody <- H.newBody playerMass $ H.infinity
+    playerBody <- H.newBody playerMass H.infinity
     H.maxVelocity playerBody $= playerSpeed
     H.spaceAdd space playerBody
     playerFeetShape <- H.newShape playerBody playerFeetShapeType (H.Vector 0 0)
@@ -334,8 +332,7 @@ main = do
                 renderShape renderer shelf shelfShapeType
                 renderShape renderer circleShape circleShapeType
 
-                forM_ wallShapes $ \(shape, shapeType) -> do
-                    renderShape renderer shape shapeType
+                forM_ wallShapes $ uncurry (renderShape renderer)
 
                 renderShape renderer playerFeetShape playerFeetShapeType
                 renderShape renderer playerBodyShape playerBodyShapeType
@@ -352,7 +349,7 @@ main = do
         -- Create a behavior with the current time
         time <- runHostFrame $ hold startTime eUpdateTime
 
-        (logicOutput) <- mainReflex (fan sdlEvent) time ePlayerGroundCollision
+        logicOutput <- mainReflex (fan sdlEvent) time ePlayerGroundCollision
         jumpHandle <- subscribeEvent $ playerYImpulse logicOutput
 
         let playerTouchGroundCallback = do
@@ -403,7 +400,7 @@ main = do
                 render (convV playerPos) currentPlayerFrame isDebugRenderingEnabled
 
                 let qPressed = any (isKeyPressed SDL.KeycodeQ) events
-                unless qPressed $ appLoop newTime $ acc' - (fromIntegral stepsToRun) * timeStep
+                unless qPressed $ appLoop newTime $ acc' - fromIntegral stepsToRun * timeStep
 
         appLoop startTime 0.0
 
@@ -426,7 +423,7 @@ main = do
 
 renderSprite :: SDL.Renderer -> Spriter.Renderer
 renderSprite renderer spritePtr spriteStatePtr = do
-    sprite <- deRefStablePtr $ castPtrToStablePtr $ castPtr $ spritePtr
+    sprite <- deRefStablePtr $ castPtrToStablePtr $ castPtr spritePtr
     spriteState <- peek spriteStatePtr
 
     textureInfo <- SDL.queryTexture $ sprite ^. Spriter.spriteTexture
@@ -445,7 +442,7 @@ renderSprite renderer spritePtr spriteStatePtr = do
         texture = sprite ^. Spriter.spriteTexture
         renderRect = SDL.Rectangle (SDL.P $ V2 x y) (V2 w h)
     SDL.copyEx
-        renderer texture Nothing (Just $ renderRect) (CDouble degAngle) pivot (V2 False False)
+        renderer texture Nothing (Just renderRect) (CDouble degAngle) pivot (V2 False False)
 
 convV :: H.Vector -> SDL.Point V2 CInt
 convV (H.Vector x y) = SDL.P $ V2 (floor x) (floor y)
@@ -462,7 +459,7 @@ renderShape renderer shape (H.Circle radius) = do
     let edgePoint = SDL.P $ sdlPos + V2
             (floor $ cos angle * radius)
             (floor $ sin angle * radius)
-    SDL.drawLine renderer (SDL.P $ sdlPos) edgePoint
+    SDL.drawLine renderer (SDL.P sdlPos) edgePoint
 renderShape renderer shape (H.LineSegment p1 p2 _) = do
     pos <- get $ H.position $ H.body shape
     SDL.rendererDrawColor renderer $= V4 255 255 255 255
@@ -478,6 +475,5 @@ renderShape renderer shape (H.Polygon verts) = do
 
     -- Would crash if there was a polygon without vertices but that should be impossible
     let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
-    forM_ edges $ \(pos1, pos2) -> do
-        SDL.drawLine renderer pos1 pos2
+    forM_ edges $ uncurry (SDL.drawLine renderer)
     SDL.drawPoint renderer $ convV pos
