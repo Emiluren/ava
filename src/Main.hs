@@ -91,7 +91,7 @@ initSDL = do
             }
     window <- SDL.createWindow "Ava" windowSettings
     renderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
-    SDL.rendererDrawColor renderer $= V4 50 50 50 255
+    SDL.rendererScale renderer $= V2 2 2
 
     return renderer
 
@@ -214,7 +214,7 @@ mainReflex sdlEvent time ePlayerTouchGround = do
 main :: IO ()
 main = do
     renderer <- initSDL
-    textures <- loadImages renderer ["princess_running.png"]
+    textures <- loadImages renderer ["res/princess_running.png"]
 
     loadedImages <- newIORef []
 
@@ -241,9 +241,9 @@ main = do
     renderf <- Spriter.makeRenderer $ renderSprite renderer
 
     Spriter.setErrorFunction
-    spriterModel <- withCString "res/CharacterTest/CharacterTest.scon"
+    spriterModel <- withCString "res/princess/Princess.scon"
         (Spriter.loadSpriterModel imgloader renderf)
-    entityInstance <- withCString "Character" $ Spriter.modelGetNewEntityInstance spriterModel
+    entityInstance <- withCString "Princess" $ Spriter.modelGetNewEntityInstance spriterModel
     withCString "Run" $ Spriter.entityInstanceSetCurrentAnimation entityInstance
 
     putStrLn "Initializing chipmunk"
@@ -318,11 +318,11 @@ main = do
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        princessTexture = textures ! "princess_running.png"
+        princessTexture = textures ! "res/princess_running.png"
 
         render :: MonadIO m => SDL.Point V2 CInt -> Int -> Bool -> m ()
         render pos frame debugRendering = do
-            SDL.rendererDrawColor renderer $= V4 0 0 0 255
+            SDL.rendererDrawColor renderer $= V4 50 50 50 255
             SDL.clear renderer
 
             renderToPos renderer princessTexture (pos - (SDL.P $ V2 32 64)) frame

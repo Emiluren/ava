@@ -5,22 +5,10 @@ import qualified Language.C.Inline.Cpp as C
 
 import Data.Map (Map)
 import Data.Monoid ((<>))
-import Data.StateVar (($=), get)
 
-import Foreign.C.String (CString, withCString, peekCString)
-import Foreign.C.Types (CInt, CDouble(..))
-import Foreign.Marshal.Alloc (free)
-import Foreign.Ptr (Ptr, castPtr, FunPtr, freeHaskellFunPtr)
-import Foreign.StablePtr
-    ( newStablePtr
-    , deRefStablePtr
-    , castStablePtrToPtr
-    , castPtrToStablePtr
-    )
-import Foreign.Storable
-
-import qualified SDL
-import qualified SDL.Image
+import Foreign.C.String (CString)
+import Foreign.C.Types (CDouble(..))
+import Foreign.Ptr (Ptr, FunPtr)
 
 import SpriterTypes
 
@@ -38,7 +26,7 @@ C.include "SpriterHelpers.hpp"
 
 C.using "namespace SpriterEngine"
 
-loadSpriterModel :: (FunPtr ImageLoader) -> (FunPtr Renderer) -> CString -> IO (Ptr CSpriterModel)
+loadSpriterModel :: FunPtr ImageLoader -> FunPtr Renderer -> CString -> IO (Ptr CSpriterModel)
 loadSpriterModel imgloader renderer modelPath =
     [C.exp| SpriterModel*
         {
