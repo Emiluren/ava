@@ -12,8 +12,6 @@ import Data.Dependent.Sum ((==>))
 import Data.Fixed (div')
 import Data.GADT.Compare.TH
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.Map ((!), Map)
-import qualified Data.Map as Map
 import Data.StateVar (($=), get)
 import Data.Word (Word32)
 
@@ -95,30 +93,6 @@ initSDL = do
 
     return renderer
 
-loadImages :: SDL.Renderer -> [String] -> IO (Map String SDL.Texture)
-loadImages renderer files =
-    (Map.fromList . zip files) <$> textures
-    where
-        textures = mapM (SDL.Image.loadTexture renderer) files
-
-destroyImages :: Map String SDL.Texture -> IO ()
-destroyImages = mapM_ SDL.destroyTexture
-
-textureSize :: MonadIO m => SDL.Texture -> m (V2 CInt)
-textureSize texture = do
-    info <- SDL.queryTexture texture
-    return $ V2 (SDL.textureWidth info) (SDL.textureHeight info)
-
-renderToPos :: MonadIO m => SDL.Renderer -> SDL.Texture -> SDL.Point V2 CInt -> Int -> m ()
-renderToPos renderer texture pos frame = do
-    _texSize <- textureSize texture
-    let
-        frameOffset = fromIntegral $ frame * 32
-        sourceRect = Just $ SDL.Rectangle (P $ V2 frameOffset 0) (V2 32 32)
-        destRect = Just $ SDL.Rectangle pos (V2 64 64)
-
-    SDL.copy renderer texture sourceRect destRect
-
 isPress :: SDL.KeyboardEventData -> Bool
 isPress event =
     SDL.keyboardEventKeyMotion event == SDL.Pressed
@@ -157,7 +131,6 @@ playerFeetCollisionType = 1
 data LogicOutput t = LogicOutput
     { playerSurfaceVel :: Behavior t H.Vector
     , playerForce :: Behavior t H.Vector
-    , playerFrame :: Behavior t Int
     , playerYImpulse :: Event t Double
     , debugRenderingEnabled :: Behavior t Bool
     }
@@ -182,7 +155,7 @@ mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
            -> Behavior t Double
            -> Event t Bool
            -> m (LogicOutput t)
-mainReflex sdlEvent time ePlayerTouchGround = do
+mainReflex sdlEvent _time ePlayerTouchGround = do
     let pressedKeyB key = hold False $ isPress <$> select sdlEvent (KeyEvent key)
         spacePressedE = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeSpace)
         f1PressedE = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeF1)
@@ -197,7 +170,6 @@ mainReflex sdlEvent time ePlayerTouchGround = do
     let playerAccX = controlVx playerSpeed <$> aPressed <*> dPressed
         playerAirForce = controlVx 1000 <$> aPressed <*> dPressed
         acc = H.Vector <$> playerAccX <*> pure 0
-        playerAnimFrame = (\t -> floor (t / frameTime) `mod` playerFrames) <$> time
 
         jumpEvent = (-1500) <$ gate playerOnGround spacePressedE
         pickFirst True x _ = x
@@ -206,7 +178,6 @@ mainReflex sdlEvent time ePlayerTouchGround = do
     return LogicOutput
         { playerSurfaceVel = pickFirst <$> playerOnGround <*> acc <*> pure (H.Vector 0 0)
         , playerForce = pickFirst <$> playerOnGround <*> pure (H.Vector 0 0) <*> playerAirForce
-        , playerFrame = playerAnimFrame
         , playerYImpulse = jumpEvent
         , debugRenderingEnabled = debugRendering
         }
@@ -214,7 +185,6 @@ mainReflex sdlEvent time ePlayerTouchGround = do
 main :: IO ()
 main = do
     renderer <- initSDL
-    textures <- loadImages renderer ["res/princess_running.png"]
 
     loadedImages <- newIORef []
 
@@ -318,15 +288,14 @@ main = do
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        princessTexture = textures ! "res/princess_running.png"
-
-        render :: MonadIO m => SDL.Point V2 CInt -> Int -> Bool -> m ()
-        render pos frame debugRendering = do
+        render :: MonadIO m => (Double, Double) -> Bool -> m ()
+        render (playerX, playerY) debugRendering = do
             SDL.rendererDrawColor renderer $= V4 50 50 50 255
             SDL.clear renderer
 
-            renderToPos renderer princessTexture (pos - (SDL.P $ V2 32 64)) frame
-            liftIO $ Spriter.renderEntityInstance entityInstance
+            liftIO $ do
+                Spriter.setEntityInstancePosition entityInstance (CDouble playerX) (CDouble playerY)
+                Spriter.renderEntityInstance entityInstance
 
             when debugRendering $ do
                 renderShape renderer shelf shelfShapeType
@@ -394,17 +363,15 @@ main = do
                 let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
 
-                currentPlayerFrame <- runHostFrame $ sample $ playerFrame logicOutput
                 isDebugRenderingEnabled <- runHostFrame $ sample $ debugRenderingEnabled logicOutput
-                playerPos <- get $ H.position playerBody
-                render (convV playerPos) currentPlayerFrame isDebugRenderingEnabled
+                (H.Vector playerX playerY) <- get $ H.position playerBody
+
+                render (playerX, playerY) isDebugRenderingEnabled
 
                 let qPressed = any (isKeyPressed SDL.KeycodeQ) events
                 unless qPressed $ appLoop newTime $ acc' - fromIntegral stepsToRun * timeStep
 
         appLoop startTime 0.0
-
-    destroyImages textures
 
     spriterImages <- readIORef loadedImages
     forM_ spriterImages $ \sprPtr -> do
@@ -437,8 +404,8 @@ renderSprite renderer spritePtr spriteStatePtr = do
         pivot = Just $ SDL.P $ V2 px py
         angle = spriteState ^. Spriter.spriteStateAngle
         degAngle = angle * (180/pi)
-        x = floor $ spriteState^.Spriter.spriteStatePosition.Spriter.pointX + 400 - fromIntegral px
-        y = floor $ spriteState^.Spriter.spriteStatePosition.Spriter.pointY + 400 - fromIntegral py
+        x = floor $ spriteState^.Spriter.spriteStatePosition.Spriter.pointX - fromIntegral px
+        y = floor $ spriteState^.Spriter.spriteStatePosition.Spriter.pointY - fromIntegral py
         texture = sprite ^. Spriter.spriteTexture
         renderRect = SDL.Rectangle (SDL.P $ V2 x y) (V2 w h)
     SDL.copyEx

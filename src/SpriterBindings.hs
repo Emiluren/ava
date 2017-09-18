@@ -66,3 +66,9 @@ entityInstanceSetTimeElapsed entityInstance dt =
     [C.exp| void {
         $(EntityInstance* entityInstance)->setTimeElapsed($(double dt))
     } |]
+
+setEntityInstancePosition :: Ptr CEntityInstance -> CDouble -> CDouble -> IO ()
+setEntityInstancePosition entityInstance x y =
+    [C.exp| void {
+        $(EntityInstance* entityInstance)->setPosition(point($(double x), $(double y)))
+    }|]
