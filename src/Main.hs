@@ -16,7 +16,7 @@ import Data.StateVar (($=), get)
 import Data.Word (Word32)
 
 import Foreign.C.String (CString, withCString, peekCString)
-import Foreign.C.Types (CInt, CDouble(..))
+import Foreign.C.Types (CInt, CFloat(..), CDouble(..))
 import Foreign.Marshal.Alloc (free)
 import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr)
 import Foreign.StablePtr
@@ -27,6 +27,8 @@ import Foreign.StablePtr
     , freeStablePtr
     )
 import Foreign.Storable
+
+import GHC.Float (float2Double)
 
 import Linear (V2(..), V4(..))
 
@@ -79,7 +81,7 @@ circleMass, circleRadius :: Num a => a
 circleMass = 10
 circleRadius = 20
 
-initSDL :: IO SDL.Renderer
+initSDL :: IO (SDL.Window, SDL.Renderer)
 initSDL = do
     SDL.initializeAll
 
@@ -89,9 +91,17 @@ initSDL = do
             }
     window <- SDL.createWindow "Ava" windowSettings
     renderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
-    SDL.rendererScale renderer $= V2 2 2
+    SDL.rendererScale renderer $= V2 3 3
 
-    return renderer
+    return (window, renderer)
+
+cameraOffset :: MonadIO m => SDL.Window -> SDL.Renderer -> m (V2 Double)
+cameraOffset window renderer = do
+    (V2 ww wh) <- get $ SDL.windowSize window
+    (V2 (CFloat rsx) (CFloat rsy)) <- get $ SDL.rendererScale renderer
+    return $ V2
+        (fromIntegral ww / 2 / float2Double rsx)
+        (fromIntegral wh / 2 / float2Double rsy)
 
 isPress :: SDL.KeyboardEventData -> Bool
 isPress event =
@@ -139,6 +149,10 @@ data SdlEventTag a where
     KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
     OtherEvent :: SdlEventTag SDL.Event
 
+newtype RenderState = RenderState
+    { cameraPosition :: V2 Double
+    }
+
 sortEvent :: SDL.Event -> DMap SdlEventTag Identity
 sortEvent event =
     case SDL.eventPayload event of
@@ -184,7 +198,7 @@ mainReflex sdlEvent _time ePlayerTouchGround = do
 
 main :: IO ()
 main = do
-    renderer <- initSDL
+    (window, renderer) <- initSDL
 
     loadedImages <- newIORef []
 
@@ -270,8 +284,8 @@ main = do
             , H.Vector (w * 0.3) (-h * 0.1)
             , H.Vector (-w * 0.3) (-h * 0.1)
             ]
-        playerWidth = 16
-        playerHeight = 56
+        playerWidth = 10
+        playerHeight = 30
         playerFeetShapeType = H.Circle $ playerWidth * 0.4
         playerBodyShapeType = H.Polygon $ reverse $ makePlayerBody playerWidth playerHeight
         playerMass = 5
@@ -288,23 +302,23 @@ main = do
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        render :: MonadIO m => (Double, Double) -> Bool -> m ()
-        render (playerX, playerY) debugRendering = do
+        render :: MonadIO m => V2 Double -> (Double, Double) -> Bool -> m ()
+        render camPos@(V2 camX camY) (playerX, playerY) debugRendering = do
             SDL.rendererDrawColor renderer $= V4 50 50 50 255
             SDL.clear renderer
 
             liftIO $ do
-                Spriter.setEntityInstancePosition entityInstance (CDouble playerX) (CDouble playerY)
+                Spriter.setEntityInstancePosition entityInstance (CDouble $ playerX - camX) (CDouble $ playerY - camY)
                 Spriter.renderEntityInstance entityInstance
 
             when debugRendering $ do
-                renderShape renderer shelf shelfShapeType
-                renderShape renderer circleShape circleShapeType
+                renderShape renderer camPos shelf shelfShapeType
+                renderShape renderer camPos circleShape circleShapeType
 
-                forM_ wallShapes $ uncurry (renderShape renderer)
+                forM_ wallShapes $ uncurry (renderShape renderer camPos)
 
-                renderShape renderer playerFeetShape playerFeetShapeType
-                renderShape renderer playerBodyShape playerBodyShapeType
+                renderShape renderer camPos playerFeetShape playerFeetShapeType
+                renderShape renderer camPos playerBodyShape playerBodyShapeType
 
             SDL.present renderer
 
@@ -366,7 +380,8 @@ main = do
                 isDebugRenderingEnabled <- runHostFrame $ sample $ debugRenderingEnabled logicOutput
                 (H.Vector playerX playerY) <- get $ H.position playerBody
 
-                render (playerX, playerY) isDebugRenderingEnabled
+                camOffset <- cameraOffset window renderer
+                render (V2 playerX playerY - camOffset) (playerX, playerY) isDebugRenderingEnabled
 
                 let qPressed = any (isKeyPressed SDL.KeycodeQ) events
                 unless qPressed $ appLoop newTime $ acc' - fromIntegral stepsToRun * timeStep
@@ -414,33 +429,33 @@ renderSprite renderer spritePtr spriteStatePtr = do
 convV :: H.Vector -> SDL.Point V2 CInt
 convV (H.Vector x y) = SDL.P $ V2 (floor x) (floor y)
 
-renderShape :: MonadIO m => SDL.Renderer -> H.Shape -> H.ShapeType -> m ()
-renderShape renderer shape (H.Circle radius) = do
+renderShape :: MonadIO m => SDL.Renderer -> V2 Double -> H.Shape -> H.ShapeType -> m ()
+renderShape renderer (V2 camX camY) shape (H.Circle radius) = do
     H.Vector px py <- get $ H.position $ H.body shape
     angle <- get $ H.angle $ H.body shape
 
     SDL.rendererDrawColor renderer $= V4 255 255 255 255
-    let sdlPos = V2 (floor px) (floor py)
+    let sdlPos = V2 (floor $ px - camX) (floor $ py - camY)
     SDL.circle renderer sdlPos (floor radius) (V4 255 255 255 255)
 
     let edgePoint = SDL.P $ sdlPos + V2
             (floor $ cos angle * radius)
             (floor $ sin angle * radius)
     SDL.drawLine renderer (SDL.P sdlPos) edgePoint
-renderShape renderer shape (H.LineSegment p1 p2 _) = do
+renderShape renderer (V2 camX camY) shape (H.LineSegment p1 p2 _) = do
     pos <- get $ H.position $ H.body shape
     SDL.rendererDrawColor renderer $= V4 255 255 255 255
-    SDL.drawLine renderer (convV $ p1 + pos) (convV $ p2 + pos)
-renderShape renderer shape (H.Polygon verts) = do
+    let camV = H.Vector camX camY
+    SDL.drawLine renderer (convV $ p1 + pos - camV) (convV $ p2 + pos - camV)
+renderShape renderer (V2 camX camY) shape (H.Polygon verts) = do
     pos <- get $ H.position $ H.body shape
     angle <- get $ H.angle $ H.body shape
-    let rot = H.rotate $ H.fromAngle angle
-        verts' :: [H.Vector]
-        verts' = map ((+pos) . rot) verts
-        sdlVerts = map convV verts'
+    let camV = H.Vector camX camY
+        rot = H.rotate $ H.fromAngle angle
+        sdlVerts = map (\v -> convV $ rot v + pos - camV) verts
     SDL.rendererDrawColor renderer $= V4 255 255 255 255
 
     -- Would crash if there was a polygon without vertices but that should be impossible
     let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
     forM_ edges $ uncurry (SDL.drawLine renderer)
-    SDL.drawPoint renderer $ convV pos
+    SDL.drawPoint renderer $ convV $ pos - camV
