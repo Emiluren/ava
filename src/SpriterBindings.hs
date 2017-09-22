@@ -10,6 +10,8 @@ import Foreign.C.String (CString)
 import Foreign.C.Types (CDouble(..))
 import Foreign.Ptr (Ptr, FunPtr)
 
+import Linear (V2(..))
+
 import SpriterTypes
 
 type SpriterFolders = Map Int (Map Int Sprite)
@@ -67,8 +69,14 @@ entityInstanceSetTimeElapsed entityInstance dt =
         $(EntityInstance* entityInstance)->setTimeElapsed($(double dt))
     } |]
 
-setEntityInstancePosition :: Ptr CEntityInstance -> CDouble -> CDouble -> IO ()
-setEntityInstancePosition entityInstance x y =
+setEntityInstancePosition :: Ptr CEntityInstance -> V2 CDouble -> IO ()
+setEntityInstancePosition entityInstance (V2 x y) =
     [C.exp| void {
         $(EntityInstance* entityInstance)->setPosition(point($(double x), $(double y)))
+    }|]
+
+setEntityInstanceScale :: Ptr CEntityInstance -> V2 CDouble -> IO ()
+setEntityInstanceScale entityInstance (V2 x y) =
+    [C.exp| void {
+        $(EntityInstance* entityInstance)->setScale(point($(double x), $(double y)))
     }|]

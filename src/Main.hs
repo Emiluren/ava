@@ -135,6 +135,7 @@ data LogicOutput t = LogicOutput
     , debugRenderingEnabled :: Behavior t Bool
     , debugRenderCharacters :: Behavior t Bool
     , playerAnimation :: Behavior t String
+    , playerDirection :: Behavior t Direction
     }
 
 data SdlEventTag a where
@@ -144,6 +145,8 @@ data SdlEventTag a where
 newtype RenderState = RenderState
     { cameraPosition :: V2 Double
     }
+
+data Direction = DLeft | DRight
 
 sortEvent :: SDL.Event -> DMap SdlEventTag Identity
 sortEvent event =
@@ -167,25 +170,26 @@ mainReflex sdlEvent _time ePlayerTouchGround = do
         eWPressed = pressEvent SDL.KeycodeW
         eF1Pressed = pressEvent SDL.KeycodeF1
         eF2Pressed = pressEvent SDL.KeycodeF2
+        eAPressed = pressEvent SDL.KeycodeA
+        eDPressed = pressEvent SDL.KeycodeD
+        flipFlop v e = hold v =<< mapAccum_ (\dr _ -> (not dr, not dr)) v e
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
-
-    let flipFlop v e = hold v =<< mapAccum_ (\dr _ -> (not dr, not dr)) v e
-
     playerOnGround <- hold False ePlayerTouchGround
     debugRendering <- flipFlop True eF1Pressed
     characterDbg <- flipFlop False $ gate debugRendering eF2Pressed
+    playerDir <- hold DRight $ leftmost [DLeft <$ eAPressed, DRight <$ eDPressed]
 
     let playerAccX = controlVx playerSpeed <$> aPressed <*> dPressed
         playerAirForce = controlVx 1000 <$> aPressed <*> dPressed
-        acc = H.Vector <$> playerAccX <*> pure 0
+        playerAcc = H.Vector <$> playerAccX <*> pure 0
 
         jumpEvent = (-1500) <$ gate playerOnGround eWPressed
         pickFirst True x _ = x
         pickFirst False _ x = x
 
-        playerSurfaceVelocity = pickFirst <$> playerOnGround <*> acc <*> pure (H.Vector 0 0)
+        playerSurfaceVelocity = pickFirst <$> playerOnGround <*> playerAcc <*> pure (H.Vector 0 0)
         playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
 
     return LogicOutput
@@ -195,6 +199,7 @@ mainReflex sdlEvent _time ePlayerTouchGround = do
         , debugRenderingEnabled = debugRendering
         , debugRenderCharacters = characterDbg
         , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
+        , playerDirection = playerDir
         }
 
 renderTextureSize :: Num a => a
@@ -318,14 +323,14 @@ main = do
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        render :: MonadIO m => V2 Double -> (Double, Double) -> Bool -> Bool -> m ()
-        render camPos@(V2 camX camY) (playerX, playerY) debugRendering characterDbg = do
+        render :: MonadIO m => V2 Double -> V2 Double -> Bool -> Bool -> m ()
+        render camPos playerPos debugRendering characterDbg = do
             SDL.rendererRenderTarget textureRenderer $= Just renderTexture
             SDL.rendererDrawColor textureRenderer $= V4 150 150 200 255
             SDL.clear textureRenderer
 
             liftIO $ do
-                Spriter.setEntityInstancePosition entityInstance (CDouble $ playerX - camX) (CDouble $ playerY - camY)
+                Spriter.setEntityInstancePosition entityInstance (CDouble <$> playerPos - camPos)
                 Spriter.renderEntityInstance entityInstance
 
             when debugRendering $ do
@@ -375,12 +380,14 @@ main = do
 
         liftIO $ H.addCollisionHandler space 0 playerFeetCollisionType playerGroundCollisionHandler
 
-        let appLoop :: Double -> Double -> SpiderHost Global ()
-            appLoop oldTime acc = do
+        let hSample = runHostFrame . sample
+
+            appLoop :: Double -> Double -> SpiderHost Global ()
+            appLoop oldTime timeAcc = do
                 newTime <- SDL.time
                 let dt = min (newTime - oldTime) 0.25
-                    acc' = acc + dt
-                    stepsToRun = acc' `div'` timeStep
+                    timeAcc' = timeAcc + dt
+                    stepsToRun = timeAcc' `div'` timeStep
 
                 liftIO $ replicateM_ stepsToRun $ H.step space timeStep
                 fireEventRef eUpdateTimeTriggerRef newTime
@@ -392,31 +399,31 @@ main = do
                         Nothing -> return ()
                         Just imp -> liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
 
-                (currentPlayerSurfaceVel,
-                 currentPlayerForce,
-                 isDebugRenderingEnabled,
-                 characterDbg,
-                 currentPlayerAnimation) <- runHostFrame $ (,,,,)
-                    <$> sample (playerSurfaceVel logicOutput)
-                    <*> sample (playerForce logicOutput)
-                    <*> sample (debugRenderingEnabled logicOutput)
-                    <*> sample (debugRenderCharacters logicOutput)
-                    <*> sample (playerAnimation logicOutput)
-
+                currentPlayerSurfaceVel <- hSample $ playerSurfaceVel logicOutput
                 H.surfaceVel playerFeetShape $= H.scale currentPlayerSurfaceVel (-1)
+
+                currentPlayerForce <- hSample $ playerForce logicOutput
                 liftIO $ H.applyOnlyForce playerBody currentPlayerForce (H.Vector 0 0)
 
+                currentPlayerAnimation <- hSample $ playerAnimation logicOutput
                 liftIO $ withCString currentPlayerAnimation $ Spriter.entityInstanceSetCurrentAnimation entityInstance
+
                 let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
 
                 (H.Vector playerX playerY) <- get $ H.position playerBody
 
+                isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput
+                characterDbg <- hSample $ debugRenderCharacters logicOutput
+                playerDir <- hSample $ playerDirection logicOutput
+                case playerDir of
+                    DRight -> liftIO $ Spriter.setEntityInstanceScale entityInstance $ V2 1 1
+                    DLeft -> liftIO $ Spriter.setEntityInstanceScale entityInstance $ V2 (-1) 1
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
-                render (V2 playerX playerY - camOffset) (playerX, playerY) isDebugRenderingEnabled characterDbg
+                render (V2 playerX playerY - camOffset) (V2 playerX playerY) isDebugRenderingEnabled characterDbg
 
                 let qPressed = any (isKeyPressed SDL.KeycodeQ) events
-                unless qPressed $ appLoop newTime $ acc' - fromIntegral stepsToRun * timeStep
+                unless qPressed $ appLoop newTime $ timeAcc' - fromIntegral stepsToRun * timeStep
 
         appLoop startTime 0.0
 
@@ -446,15 +453,19 @@ renderSprite textureRenderer spritePtr spriteStatePtr = do
     -- TODO: Scale and alpha are not used, maybe switch to SFML
     let w = fromIntegral $ SDL.textureWidth textureInfo
         h = fromIntegral $ SDL.textureHeight textureInfo
-        px = floor $ (sprite ^. Spriter.spritePivotX) * fromIntegral w
-        py = floor $ (sprite ^. Spriter.spritePivotY) * fromIntegral h
+        scaleX = spriteState ^. Spriter.spriteStateScale . Spriter.pointX
+        scaleY = spriteState ^. Spriter.spriteStateScale . Spriter.pointY
+        sw = floor $ scaleX * w
+        sh = floor $ scaleY * h
+        px = floor $ (sprite ^. Spriter.spritePivotX) * fromIntegral sw
+        py = floor $ (sprite ^. Spriter.spritePivotY) * fromIntegral sh
         pivot = Just $ SDL.P $ V2 px py
         angle = spriteState ^. Spriter.spriteStateAngle
         degAngle = angle * (180/pi)
         x = floor $ spriteState ^. Spriter.spriteStatePosition . Spriter.pointX - fromIntegral px
         y = floor $ spriteState ^. Spriter.spriteStatePosition . Spriter.pointY - fromIntegral py
         texture = sprite ^. Spriter.spriteTexture
-        renderRect = SDL.Rectangle (SDL.P $ V2 x y) (V2 w h)
+        renderRect = SDL.Rectangle (SDL.P $ V2 x y) (V2 sw sh)
     SDL.copyEx
         textureRenderer texture Nothing (Just renderRect) (CDouble degAngle) pivot (V2 False False)
 
