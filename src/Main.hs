@@ -93,6 +93,10 @@ isPress :: SDL.KeyboardEventData -> Bool
 isPress event =
     SDL.keyboardEventKeyMotion event == SDL.Pressed
 
+isRelease :: SDL.KeyboardEventData -> Bool
+isRelease event =
+    SDL.keyboardEventKeyMotion event == SDL.Released
+
 eventKeycode :: SDL.KeyboardEventData -> SDL.Keycode
 eventKeycode = SDL.keysymKeycode . SDL.keyboardEventKeysym
 
@@ -130,6 +134,7 @@ data LogicOutput t = LogicOutput
     , playerYImpulse :: Event t Double
     , debugRenderingEnabled :: Behavior t Bool
     , debugRenderCharacters :: Behavior t Bool
+    , playerAnimation :: Behavior t String
     }
 
 data SdlEventTag a where
@@ -158,9 +163,10 @@ mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
            -> m (LogicOutput t)
 mainReflex sdlEvent _time ePlayerTouchGround = do
     let pressedKeyB key = hold False $ isPress <$> select sdlEvent (KeyEvent key)
-        eWPressed = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeW)
-        eF1Pressed = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeF1)
-        eF2Pressed = ffilter isPress $ select sdlEvent (KeyEvent SDL.KeycodeF2)
+        pressEvent kc = ffilter isPress $ select sdlEvent (KeyEvent kc)
+        eWPressed = pressEvent SDL.KeycodeW
+        eF1Pressed = pressEvent SDL.KeycodeF1
+        eF2Pressed = pressEvent SDL.KeycodeF2
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
@@ -179,12 +185,16 @@ mainReflex sdlEvent _time ePlayerTouchGround = do
         pickFirst True x _ = x
         pickFirst False _ x = x
 
+        playerSurfaceVelocity = pickFirst <$> playerOnGround <*> acc <*> pure (H.Vector 0 0)
+        playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
+
     return LogicOutput
-        { playerSurfaceVel = pickFirst <$> playerOnGround <*> acc <*> pure (H.Vector 0 0)
+        { playerSurfaceVel = playerSurfaceVelocity
         , playerForce = pickFirst <$> playerOnGround <*> pure (H.Vector 0 0) <*> playerAirForce
         , playerYImpulse = jumpEvent
         , debugRenderingEnabled = debugRendering
         , debugRenderCharacters = characterDbg
+        , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
         }
 
 renderTextureSize :: Num a => a
@@ -234,7 +244,7 @@ main = do
     spriterModel <- withCString "res/princess/Princess.scon"
         (Spriter.loadSpriterModel imgloader renderf)
     entityInstance <- withCString "Princess" $ Spriter.modelGetNewEntityInstance spriterModel
-    withCString "Run" $ Spriter.entityInstanceSetCurrentAnimation entityInstance
+    withCString "Idle" $ Spriter.entityInstanceSetCurrentAnimation entityInstance
 
     putStrLn "Initializing chipmunk"
     H.initChipmunk
@@ -331,7 +341,7 @@ main = do
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
-            let dispHeight = floor (renderTextureSize / fromIntegral ww * fromIntegral wh)
+            let dispHeight = floor (renderTextureSize / fromIntegral ww * fromIntegral wh :: Float)
                 renderRect = SDL.Rectangle (SDL.P $ V2 0 $ (renderTextureSize - dispHeight) `div` 2) (V2 renderTextureSize dispHeight)
             SDL.copy textureRenderer renderTexture (Just renderRect) Nothing
             SDL.present textureRenderer
@@ -343,7 +353,6 @@ main = do
 
         startTime <- SDL.time
 
-        -- Create a behavior with the current time
         time <- runHostFrame $ hold startTime eUpdateTime
 
         logicOutput <- mainReflex (fan sdlEvent) time ePlayerGroundCollision
@@ -386,16 +395,19 @@ main = do
                 (currentPlayerSurfaceVel,
                  currentPlayerForce,
                  isDebugRenderingEnabled,
-                 characterDbg) <- runHostFrame $ (,,,)
+                 characterDbg,
+                 currentPlayerAnimation) <- runHostFrame $ (,,,,)
                     <$> sample (playerSurfaceVel logicOutput)
                     <*> sample (playerForce logicOutput)
                     <*> sample (debugRenderingEnabled logicOutput)
                     <*> sample (debugRenderCharacters logicOutput)
+                    <*> sample (playerAnimation logicOutput)
 
                 H.surfaceVel playerFeetShape $= H.scale currentPlayerSurfaceVel (-1)
                 liftIO $ H.applyOnlyForce playerBody currentPlayerForce (H.Vector 0 0)
 
-                let spriterTimeStep = CDouble $ dt * 100
+                liftIO $ withCString currentPlayerAnimation $ Spriter.entityInstanceSetCurrentAnimation entityInstance
+                let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
 
                 (H.Vector playerX playerY) <- get $ H.position playerBody
@@ -439,8 +451,8 @@ renderSprite textureRenderer spritePtr spriteStatePtr = do
         pivot = Just $ SDL.P $ V2 px py
         angle = spriteState ^. Spriter.spriteStateAngle
         degAngle = angle * (180/pi)
-        x = floor $ spriteState^.Spriter.spriteStatePosition.Spriter.pointX - fromIntegral px
-        y = floor $ spriteState^.Spriter.spriteStatePosition.Spriter.pointY - fromIntegral py
+        x = floor $ spriteState ^. Spriter.spriteStatePosition . Spriter.pointX - fromIntegral px
+        y = floor $ spriteState ^. Spriter.spriteStatePosition . Spriter.pointY - fromIntegral py
         texture = sprite ^. Spriter.spriteTexture
         renderRect = SDL.Rectangle (SDL.P $ V2 x y) (V2 w h)
     SDL.copyEx
