@@ -8,10 +8,11 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
-import Data.Dependent.Sum ((==>))
+import Data.Dependent.Sum ((==>), DSum(..))
 import Data.Fixed (div')
 import Data.GADT.Compare.TH
 import Data.IORef (newIORef, modifyIORef', readIORef)
+import Data.Maybe (isJust)
 import Data.StateVar (($=), get)
 import Data.Word (Word32)
 
@@ -39,8 +40,8 @@ import Reflex.Host.Class
     ( newEventWithTriggerRef
     , runHostFrame
     , fireEventRef
-    , fireEventRefAndRead
     , subscribeEvent
+    , readEvent
     )
 
 import SDL (Point(P))
@@ -136,6 +137,8 @@ data LogicOutput t = LogicOutput
     , debugRenderCharacters :: Behavior t Bool
     , playerAnimation :: Behavior t String
     , playerDirection :: Behavior t Direction
+    , quit :: Event t ()
+    , ePrint :: Event t String
     }
 
 data SdlEventTag a where
@@ -200,6 +203,8 @@ mainReflex sdlEvent _time ePlayerTouchGround = do
         , debugRenderCharacters = characterDbg
         , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
         , playerDirection = playerDir
+        , quit = () <$ pressEvent SDL.KeycodeQ
+        , ePrint = never
         }
 
 renderTextureSize :: Num a => a
@@ -347,7 +352,9 @@ main = do
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
             let dispHeight = floor (renderTextureSize / fromIntegral ww * fromIntegral wh :: Float)
-                renderRect = SDL.Rectangle (SDL.P $ V2 0 $ (renderTextureSize - dispHeight) `div` 2) (V2 renderTextureSize dispHeight)
+                renderRect = SDL.Rectangle
+                    (SDL.P $ V2 0 $ (renderTextureSize - dispHeight) `div` 2)
+                    (V2 renderTextureSize dispHeight)
             SDL.copy textureRenderer renderTexture (Just renderRect) Nothing
             SDL.present textureRenderer
 
@@ -361,8 +368,6 @@ main = do
         time <- runHostFrame $ hold startTime eUpdateTime
 
         logicOutput <- mainReflex (fan sdlEvent) time ePlayerGroundCollision
-        jumpHandle <- subscribeEvent $ playerYImpulse logicOutput
-
         let playerTouchGroundCallback = do
                 liftIO $ runSpiderHost $ fireEventRef ePlayerGroundCollisionRef True
                 return True
@@ -380,6 +385,13 @@ main = do
 
         liftIO $ H.addCollisionHandler space 0 playerFeetCollisionType playerGroundCollisionHandler
 
+        (_, FireCommand fire) <- hostPerformEventT $ do
+            let jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
+            performEvent_ $ jump <$> playerYImpulse logicOutput
+            performEvent_ $ liftIO . putStrLn <$> ePrint logicOutput
+
+        hQuit <- subscribeEvent $ quit logicOutput
+
         let hSample = runHostFrame . sample
 
             appLoop :: Double -> Double -> SpiderHost Global ()
@@ -392,12 +404,14 @@ main = do
                 liftIO $ replicateM_ stepsToRun $ H.step space timeStep
                 fireEventRef eUpdateTimeTriggerRef newTime
 
-                events <- SDL.pollEvents
-                forM_ events $ \evt -> do
-                    mJump <- fireEventRefAndRead sdlTriggerRef (sortEvent evt) jumpHandle
-                    case mJump of
-                        Nothing -> return ()
-                        Just imp -> liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
+                mSdlTrigger <- liftIO $ readIORef sdlTriggerRef
+                mQuit <- case mSdlTrigger of
+                    Nothing -> return []
+                    Just sdlTrigger -> do
+                        events <- SDL.pollEvents
+                        let triggerSdlEvent evt = sdlTrigger :=> Identity (sortEvent evt)
+                        fire (fmap triggerSdlEvent events) $
+                            readEvent hQuit >>= sequence
 
                 currentPlayerSurfaceVel <- hSample $ playerSurfaceVel logicOutput
                 H.surfaceVel playerFeetShape $= H.scale currentPlayerSurfaceVel (-1)
@@ -406,7 +420,8 @@ main = do
                 liftIO $ H.applyOnlyForce playerBody currentPlayerForce (H.Vector 0 0)
 
                 currentPlayerAnimation <- hSample $ playerAnimation logicOutput
-                liftIO $ withCString currentPlayerAnimation $ Spriter.entityInstanceSetCurrentAnimation entityInstance
+                liftIO $ withCString currentPlayerAnimation $
+                    Spriter.entityInstanceSetCurrentAnimation entityInstance
 
                 let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
@@ -420,10 +435,16 @@ main = do
                     DRight -> liftIO $ Spriter.setEntityInstanceScale entityInstance $ V2 1 1
                     DLeft -> liftIO $ Spriter.setEntityInstanceScale entityInstance $ V2 (-1) 1
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
-                render (V2 playerX playerY - camOffset) (V2 playerX playerY) isDebugRenderingEnabled characterDbg
 
-                let qPressed = any (isKeyPressed SDL.KeycodeQ) events
-                unless qPressed $ appLoop newTime $ timeAcc' - fromIntegral stepsToRun * timeStep
+                render
+                    (V2 playerX playerY - camOffset)
+                    (V2 playerX playerY)
+                    isDebugRenderingEnabled
+                    characterDbg
+
+                let shouldQuit = any isJust mQuit
+                unless shouldQuit $
+                    appLoop newTime $ timeAcc' - fromIntegral stepsToRun * timeStep
 
         appLoop startTime 0.0
 
@@ -448,9 +469,7 @@ renderSprite textureRenderer spritePtr spriteStatePtr = do
     spriteState <- peek spriteStatePtr
 
     textureInfo <- SDL.queryTexture $ sprite ^. Spriter.spriteTexture
-    --putStrLn $ "rendering: " ++ sprite ^. spriteName
-    --print spriteState
-    -- TODO: Scale and alpha are not used, maybe switch to SFML
+    -- TODO: alpha is not used
     let w = fromIntegral $ SDL.textureWidth textureInfo
         h = fromIntegral $ SDL.textureHeight textureInfo
         scaleX = spriteState ^. Spriter.spriteStateScale . Spriter.pointX
