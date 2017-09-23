@@ -36,9 +36,11 @@ executable ava
                      , linear
                      , mtl
                      , reflex
+                     , ref-tf
                      , sdl2 >= 2.1
                      , sdl2-gfx
                      , sdl2-image
                      , StateVar
                      , template-haskell
                      , transformers
+                     , vector

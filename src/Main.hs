@@ -5,6 +5,7 @@ import Control.Lens ((^.))
 import Control.Monad (unless, replicateM_)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Ref (Ref, MonadRef)
 
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
@@ -12,8 +13,9 @@ import Data.Dependent.Sum ((==>), DSum(..))
 import Data.Fixed (div')
 import Data.GADT.Compare.TH
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, fromMaybe)
 import Data.StateVar (($=), get)
+import qualified Data.Vector as Vector
 import Data.Word (Word32)
 
 import Foreign.C.String (CString, withCString, peekCString)
@@ -42,6 +44,7 @@ import Reflex.Host.Class
     , fireEventRef
     , subscribeEvent
     , readEvent
+    , MonadReflexHost
     )
 
 import SDL (Point(P))
@@ -139,10 +142,12 @@ data LogicOutput t = LogicOutput
     , playerDirection :: Behavior t Direction
     , quit :: Event t ()
     , ePrint :: Event t String
+    , checkJoysticks :: Event t ()
     }
 
 data SdlEventTag a where
     KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
+    ControllerDeviceEvent :: SdlEventTag SDL.ControllerDeviceEventData
     OtherEvent :: SdlEventTag SDL.Event
 
 newtype RenderState = RenderState
@@ -156,6 +161,8 @@ sortEvent event =
     case SDL.eventPayload event of
         SDL.KeyboardEvent keyboardEvent ->
             DMap.fromList [KeyEvent (eventKeycode keyboardEvent) ==> keyboardEvent]
+        SDL.ControllerDeviceEvent controllerDeviceEvent ->
+            DMap.fromList [ControllerDeviceEvent ==> controllerDeviceEvent]
         _ ->
             DMap.fromList [OtherEvent ==> event]
 
@@ -166,8 +173,9 @@ mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
            => EventSelector t SdlEventTag
            -> Behavior t Double
            -> Event t Bool
+           -> Maybe (Behavior t Double)
            -> m (LogicOutput t)
-mainReflex sdlEvent _time ePlayerTouchGround = do
+mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
     let pressedKeyB key = hold False $ isPress <$> select sdlEvent (KeyEvent key)
         pressEvent kc = ffilter isPress $ select sdlEvent (KeyEvent kc)
         eWPressed = pressEvent SDL.KeycodeW
@@ -175,16 +183,18 @@ mainReflex sdlEvent _time ePlayerTouchGround = do
         eF2Pressed = pressEvent SDL.KeycodeF2
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
-        flipFlop v e = hold v =<< mapAccum_ (\dr _ -> (not dr, not dr)) v e
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
     playerOnGround <- hold False ePlayerTouchGround
-    debugRendering <- flipFlop True eF1Pressed
-    characterDbg <- flipFlop False $ gate debugRendering eF2Pressed
+    debugRendering <- current <$> toggle True eF1Pressed
+    characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     playerDir <- hold DRight $ leftmost [DLeft <$ eAPressed, DRight <$ eDPressed]
 
-    let playerAccX = controlVx playerSpeed <$> aPressed <*> dPressed
+    let playerKeyAccX = controlVx playerSpeed <$> aPressed <*> dPressed
+        playerAccX = case mAxis of
+            Nothing -> playerKeyAccX
+            Just axis -> (* playerSpeed) <$> axis
         playerAirForce = controlVx 1000 <$> aPressed <*> dPressed
         playerAcc = H.Vector <$> playerAccX <*> pure 0
 
@@ -204,11 +214,19 @@ mainReflex sdlEvent _time ePlayerTouchGround = do
         , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
         , playerDirection = playerDir
         , quit = () <$ pressEvent SDL.KeycodeQ
-        , ePrint = never
+        , ePrint = show <$> select sdlEvent ControllerDeviceEvent
+        , checkJoysticks = () <$ pressEvent SDL.KeycodeH
         }
 
 renderTextureSize :: Num a => a
 renderTextureSize = 512
+
+mutableBehavior :: (Ref m ~ Ref IO, MonadRef m, MonadReflexHost t m)
+    => Double -> m (Behavior t Double, Double -> m ())
+mutableBehavior startValue = do
+    (eUpdateValue, eUpdateValueTriggerRef) <- newEventWithTriggerRef
+    time <- runHostFrame $ hold startValue eUpdateValue
+    return (time, fireEventRef eUpdateValueTriggerRef)
 
 main :: IO ()
 main = do
@@ -346,7 +364,8 @@ main = do
                     renderShape textureRenderer camPos shape shapeType $ H.Vector 0 0
 
                 when characterDbg $ do
-                    renderShape textureRenderer camPos playerFeetShape playerFeetShapeType $ H.Vector 0 $ - playerWidth * 0.2
+                    renderShape textureRenderer camPos playerFeetShape playerFeetShapeType $
+                        H.Vector 0 $ - playerWidth * 0.2
                     renderShape textureRenderer camPos playerBodyShape playerBodyShapeType $ H.Vector 0 0
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
@@ -360,21 +379,27 @@ main = do
 
     runSpiderHost $ do
         (sdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
-        (eUpdateTime, eUpdateTimeTriggerRef) <- newEventWithTriggerRef
         (ePlayerGroundCollision, ePlayerGroundCollisionRef) <- newEventWithTriggerRef
 
         startTime <- SDL.time
+        (time, updateTime) <- mutableBehavior startTime
 
-        time <- runHostFrame $ hold startTime eUpdateTime
+        joysticks <- SDL.availableJoysticks
+        mGamepad <- if null joysticks
+            then return Nothing
+            else Just <$> SDL.openJoystick (Vector.head joysticks)
 
-        logicOutput <- mainReflex (fan sdlEvent) time ePlayerGroundCollision
+        (mAxis, mSetAxis) <- case mGamepad of
+            Nothing -> return (Nothing, Nothing)
+            Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior 0
+
+        logicOutput <- mainReflex (fan sdlEvent) time ePlayerGroundCollision mAxis
         let playerTouchGroundCallback = do
                 liftIO $ runSpiderHost $ fireEventRef ePlayerGroundCollisionRef True
                 return True
 
-            playerLeaveGroundCallback = do
+            playerLeaveGroundCallback =
                 liftIO $ runSpiderHost $ fireEventRef ePlayerGroundCollisionRef False
-                return ()
 
             playerGroundCollisionHandler = H.Handler
                 { H.beginHandler = Just playerTouchGroundCallback
@@ -385,10 +410,15 @@ main = do
 
         liftIO $ H.addCollisionHandler space 0 playerFeetCollisionType playerGroundCollisionHandler
 
+        let printJoysticks = do
+                joys <- SDL.availableJoysticks
+                liftIO $ print joys
+
         (_, FireCommand fire) <- hostPerformEventT $ do
             let jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
             performEvent_ $ jump <$> playerYImpulse logicOutput
             performEvent_ $ liftIO . putStrLn <$> ePrint logicOutput
+            performEvent_ $ printJoysticks <$ checkJoysticks logicOutput
 
         hQuit <- subscribeEvent $ quit logicOutput
 
@@ -402,7 +432,12 @@ main = do
                     stepsToRun = timeAcc' `div'` timeStep
 
                 liftIO $ replicateM_ stepsToRun $ H.step space timeStep
-                fireEventRef eUpdateTimeTriggerRef newTime
+                updateTime newTime
+
+                fromMaybe (return ()) $ do
+                    gamepad <- mGamepad
+                    setAxis <- mSetAxis
+                    Just $ setAxis =<< (\ap -> fromIntegral ap / 32767) <$> SDL.axisPosition gamepad 0
 
                 mSdlTrigger <- liftIO $ readIORef sdlTriggerRef
                 mQuit <- case mSdlTrigger of
