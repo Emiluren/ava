@@ -64,7 +64,7 @@ winSize :: V2 CInt
 winSize = V2 winWidth winHeight
 
 timeStep :: Double
-timeStep = 1/60
+timeStep = 1/120
 
 shelfStart, shelfEnd :: Num a => (a, a)
 shelfStart = (100, 200)
@@ -338,7 +338,7 @@ main = do
             ]
         playerWidth = 10
         playerHeight = 30
-        playerFeetShapeType = H.Circle $ playerWidth * 0.4
+        playerFeetShapeType = H.Circle $ playerWidth * 0.3
         playerBodyShapeType = H.Polygon $ reverse $ makePlayerBody playerWidth playerHeight
         playerMass = 5
     playerBody <- H.newBody playerMass H.infinity
