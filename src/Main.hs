@@ -49,6 +49,7 @@ import Reflex.Host.Class
 
 import SDL (Point(P))
 import qualified SDL
+import qualified SDL.Raw.Types as SDL (JoystickID)
 import qualified SDL.Image
 import qualified SDL.Primitive as SDL
 
@@ -146,8 +147,9 @@ data LogicOutput t = LogicOutput
     }
 
 data SdlEventTag a where
-    KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
     ControllerDeviceEvent :: SdlEventTag SDL.ControllerDeviceEventData
+    JoyButtonEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyButtonEventData
+    KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
     OtherEvent :: SdlEventTag SDL.Event
 
 newtype RenderState = RenderState
@@ -158,13 +160,16 @@ data Direction = DLeft | DRight
 
 sortEvent :: SDL.Event -> DMap SdlEventTag Identity
 sortEvent event =
-    case SDL.eventPayload event of
-        SDL.KeyboardEvent keyboardEvent ->
-            DMap.fromList [KeyEvent (eventKeycode keyboardEvent) ==> keyboardEvent]
+    wrapInDMap $ case SDL.eventPayload event of
         SDL.ControllerDeviceEvent controllerDeviceEvent ->
-            DMap.fromList [ControllerDeviceEvent ==> controllerDeviceEvent]
+            ControllerDeviceEvent ==> controllerDeviceEvent
+        SDL.JoyButtonEvent joyButtonEvent ->
+            JoyButtonEvent (SDL.joyButtonEventWhich joyButtonEvent) ==> joyButtonEvent
+        SDL.KeyboardEvent keyboardEvent ->
+            KeyEvent (eventKeycode keyboardEvent) ==> keyboardEvent
         _ ->
-            DMap.fromList [OtherEvent ==> event]
+            OtherEvent ==> event
+    where wrapInDMap x = DMap.fromList [x]
 
 deriveGEq ''SdlEventTag
 deriveGCompare ''SdlEventTag
@@ -183,6 +188,8 @@ mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
         eF2Pressed = pressEvent SDL.KeycodeF2
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
+        padButtonPress = select sdlEvent (JoyButtonEvent 0)
+        ePadAPressed = ffilter (\(SDL.JoyButtonEventData _ b s) -> b == 0 && s == 1) padButtonPress
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
@@ -197,8 +204,9 @@ mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
             Just axis -> (* playerSpeed) <$> axis
         playerAirForce = controlVx 1000 <$> aPressed <*> dPressed
         playerAcc = H.Vector <$> playerAccX <*> pure 0
+        ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
 
-        jumpEvent = (-1500) <$ gate playerOnGround eWPressed
+        jumpEvent = (-1500) <$ gate playerOnGround ePlayerWantsToJump
         pickFirst True x _ = x
         pickFirst False _ x = x
 
@@ -214,7 +222,7 @@ mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
         , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
         , playerDirection = playerDir
         , quit = () <$ pressEvent SDL.KeycodeQ
-        , ePrint = show <$> select sdlEvent ControllerDeviceEvent
+        , ePrint = never
         , checkJoysticks = () <$ pressEvent SDL.KeycodeH
         }
 
