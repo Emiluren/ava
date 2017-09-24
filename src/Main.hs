@@ -280,10 +280,16 @@ main = do
     renderf <- Spriter.makeRenderer $ renderSprite textureRenderer
 
     Spriter.setErrorFunction
-    spriterModel <- withCString "res/princess/Princess.scon"
+
+    playerSpriterModel <- withCString "res/princess/Princess.scon"
         (Spriter.loadSpriterModel imgloader renderf)
-    entityInstance <- withCString "Princess" $ Spriter.modelGetNewEntityInstance spriterModel
-    withCString "Idle" $ Spriter.entityInstanceSetCurrentAnimation entityInstance
+    playerEntityInstance <- withCString "Princess" $ Spriter.modelGetNewEntityInstance playerSpriterModel
+    withCString "Idle" $ Spriter.entityInstanceSetCurrentAnimation playerEntityInstance
+
+    mummySpriterModel <- withCString "res/mummy/Mummy.scon"
+        (Spriter.loadSpriterModel imgloader renderf)
+    mummyEntityInstance <- withCString "Mummy" $ Spriter.modelGetNewEntityInstance mummySpriterModel
+    withCString "Idle" $ Spriter.entityInstanceSetCurrentAnimation mummyEntityInstance
 
     putStrLn "Initializing chipmunk"
     H.initChipmunk
@@ -329,7 +335,7 @@ main = do
     H.spaceAdd space circleShape
     H.position circleBody $= H.Vector 200 20
 
-    let makePlayerBody w h =
+    let makeCharacterBody w h =
             [ H.Vector (-w * 0.5) (-h * 0.2)
             , H.Vector (-w * 0.5) (-h * 0.8)
             , H.Vector (-w * 0.3) (-h)
@@ -339,16 +345,29 @@ main = do
             , H.Vector (w * 0.3) (-h * 0.1)
             , H.Vector (-w * 0.3) (-h * 0.1)
             ]
-        playerWidth = 10
-        playerHeight = 30
-        playerFeetShapeType = H.Circle $ playerWidth * 0.3
-        playerBodyShapeType = H.Polygon $ reverse $ makePlayerBody playerWidth playerHeight
-        playerMass = 5
-    playerBody <- H.newBody playerMass H.infinity
+        characterWidth = 10
+        characterHeight = 30
+        characterFeetShapeType = H.Circle $ characterWidth * 0.3
+        characterBodyShapeType = H.Polygon $ reverse $ makeCharacterBody characterWidth characterHeight
+        characterMass = 5
+
+    mummyBody <- H.newBody characterMass H.infinity
+    H.maxVelocity mummyBody $= playerSpeed
+    H.spaceAdd space mummyBody
+    mummyFeetShape <- H.newShape mummyBody characterFeetShapeType (H.Vector 0 $ -characterWidth * 0.2)
+    mummyBodyShape <- H.newShape mummyBody characterBodyShapeType (H.Vector 0 0)
+    H.spaceAdd space mummyFeetShape
+    H.spaceAdd space mummyBodyShape
+    H.friction mummyFeetShape $= 2
+    H.friction mummyBodyShape $= 0
+    H.position mummyBody $= H.Vector 100 200
+    --H.collisionType mummyFeetShape $= playerFeetCollisionType
+
+    playerBody <- H.newBody characterMass H.infinity
     H.maxVelocity playerBody $= playerSpeed
     H.spaceAdd space playerBody
-    playerFeetShape <- H.newShape playerBody playerFeetShapeType (H.Vector 0 $ -playerWidth * 0.2)
-    playerBodyShape <- H.newShape playerBody playerBodyShapeType (H.Vector 0 0)
+    playerFeetShape <- H.newShape playerBody characterFeetShapeType (H.Vector 0 $ -characterWidth * 0.2)
+    playerBodyShape <- H.newShape playerBody characterBodyShapeType (H.Vector 0 0)
     H.spaceAdd space playerFeetShape
     H.spaceAdd space playerBodyShape
     H.friction playerFeetShape $= 2
@@ -357,15 +376,18 @@ main = do
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        render :: MonadIO m => V2 Double -> V2 Double -> Bool -> Bool -> m ()
-        render camPos playerPos debugRendering characterDbg = do
+        render :: MonadIO m => V2 Double -> V2 Double -> V2 Double -> Bool -> Bool -> m ()
+        render camPos playerPos mummyPos debugRendering characterDbg = do
             SDL.rendererRenderTarget textureRenderer $= Just renderTexture
             SDL.rendererDrawColor textureRenderer $= V4 150 150 200 255
             SDL.clear textureRenderer
 
             liftIO $ do
-                Spriter.setEntityInstancePosition entityInstance (CDouble <$> playerPos - camPos)
-                Spriter.renderEntityInstance entityInstance
+                Spriter.setEntityInstancePosition playerEntityInstance (CDouble <$> playerPos - camPos)
+                Spriter.renderEntityInstance playerEntityInstance
+
+                Spriter.setEntityInstancePosition mummyEntityInstance (CDouble <$> mummyPos - camPos)
+                Spriter.renderEntityInstance mummyEntityInstance
 
             when debugRendering $ do
                 renderShape textureRenderer camPos shelf shelfShapeType $ H.Vector 0 0
@@ -375,9 +397,9 @@ main = do
                     renderShape textureRenderer camPos shape shapeType $ H.Vector 0 0
 
                 when characterDbg $ do
-                    renderShape textureRenderer camPos playerFeetShape playerFeetShapeType $
-                        H.Vector 0 $ - playerWidth * 0.2
-                    renderShape textureRenderer camPos playerBodyShape playerBodyShapeType $ H.Vector 0 0
+                    renderShape textureRenderer camPos playerFeetShape characterFeetShapeType $
+                        H.Vector 0 $ - characterWidth * 0.2
+                    renderShape textureRenderer camPos playerBodyShape characterBodyShapeType $ H.Vector 0 0
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
@@ -469,24 +491,28 @@ main = do
 
                 currentPlayerAnimation <- hSample $ playerAnimation logicOutput
                 liftIO $ withCString currentPlayerAnimation $
-                    Spriter.entityInstanceSetCurrentAnimation entityInstance
+                    Spriter.entityInstanceSetCurrentAnimation playerEntityInstance
 
                 let spriterTimeStep = CDouble $ dt * 1000
-                liftIO $ Spriter.entityInstanceSetTimeElapsed entityInstance spriterTimeStep
+                liftIO $ do
+                    Spriter.entityInstanceSetTimeElapsed playerEntityInstance spriterTimeStep
+                    Spriter.entityInstanceSetTimeElapsed mummyEntityInstance spriterTimeStep
 
                 (H.Vector playerX playerY) <- get $ H.position playerBody
+                (H.Vector mummyX mummyY) <- get $ H.position mummyBody
 
                 isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput
                 characterDbg <- hSample $ debugRenderCharacters logicOutput
                 playerDir <- hSample $ playerDirection logicOutput
                 case playerDir of
-                    DRight -> liftIO $ Spriter.setEntityInstanceScale entityInstance $ V2 1 1
-                    DLeft -> liftIO $ Spriter.setEntityInstanceScale entityInstance $ V2 (-1) 1
+                    DRight -> liftIO $ Spriter.setEntityInstanceScale playerEntityInstance $ V2 1 1
+                    DLeft -> liftIO $ Spriter.setEntityInstanceScale playerEntityInstance $ V2 (-1) 1
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
 
                 render
                     (V2 playerX playerY - camOffset)
                     (V2 playerX playerY)
+                    (V2 mummyX mummyY)
                     isDebugRenderingEnabled
                     characterDbg
 
@@ -505,8 +531,10 @@ main = do
 
     SDL.quit
 
-    free entityInstance
-    free spriterModel
+    free playerEntityInstance
+    free playerSpriterModel
+    free mummyEntityInstance
+    free mummySpriterModel
     freeHaskellFunPtr imgloader
     freeHaskellFunPtr renderf
     H.freeSpace space
