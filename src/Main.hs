@@ -56,19 +56,12 @@ import qualified SDL.Primitive as SDL
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
 
-winWidth, winHeight :: Num a => a
-winWidth = 800
-winHeight = 600
-
-winSize :: V2 CInt
-winSize = V2 winWidth winHeight
-
 timeStep :: Double
 timeStep = 1/120
 
 shelfStart, shelfEnd :: Num a => (a, a)
 shelfStart = (100, 200)
-shelfEnd = (400, 300)
+shelfEnd = (300, 350)
 
 makeHVector :: (Double, Double) -> H.Vector
 makeHVector = uncurry H.Vector
@@ -111,8 +104,8 @@ isKey keycode = (== keycode) . eventKeycode
 isKeyPressed :: SDL.Keycode -> SDL.Event -> Bool
 isKeyPressed key event =
     case SDL.eventPayload event of
-        SDL.KeyboardEvent keyboardEvent ->
-            isPress keyboardEvent && isKey key keyboardEvent
+        SDL.KeyboardEvent eventData ->
+            isPress eventData && isKey key eventData
         _ ->
             False
 
@@ -148,6 +141,7 @@ data LogicOutput t = LogicOutput
 
 data SdlEventTag a where
     ControllerDeviceEvent :: SdlEventTag SDL.ControllerDeviceEventData
+    JoyAxisEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyAxisEventData
     JoyButtonEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyButtonEventData
     KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
     OtherEvent :: SdlEventTag SDL.Event
@@ -161,12 +155,14 @@ data Direction = DLeft | DRight
 sortEvent :: SDL.Event -> DMap SdlEventTag Identity
 sortEvent event =
     wrapInDMap $ case SDL.eventPayload event of
-        SDL.ControllerDeviceEvent controllerDeviceEvent ->
-            ControllerDeviceEvent ==> controllerDeviceEvent
-        SDL.JoyButtonEvent joyButtonEvent ->
-            JoyButtonEvent (SDL.joyButtonEventWhich joyButtonEvent) ==> joyButtonEvent
-        SDL.KeyboardEvent keyboardEvent ->
-            KeyEvent (eventKeycode keyboardEvent) ==> keyboardEvent
+        SDL.ControllerDeviceEvent axis ->
+            ControllerDeviceEvent ==> axis
+        SDL.JoyAxisEvent eventData ->
+            JoyAxisEvent (SDL.joyAxisEventWhich eventData) ==> eventData
+        SDL.JoyButtonEvent eventData ->
+            JoyButtonEvent (SDL.joyButtonEventWhich eventData) ==> eventData
+        SDL.KeyboardEvent eventData ->
+            KeyEvent (eventKeycode eventData) ==> eventData
         _ ->
             OtherEvent ==> event
     where wrapInDMap x = DMap.fromList [x]
@@ -189,33 +185,41 @@ mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
         padButtonPress = select sdlEvent (JoyButtonEvent 0)
+        padAxisMove = select sdlEvent (JoyAxisEvent 0)
         ePadAPressed = ffilter (\(SDL.JoyButtonEventData _ b s) -> b == 0 && s == 1) padButtonPress
+        ePadNotCenter = ffilter (\(SDL.JoyAxisEventData _ a v) -> a == 0 && v /= 0) padAxisMove
+        ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
+            <$> ePadNotCenter
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
     playerOnGround <- hold False ePlayerTouchGround
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
-    playerDir <- hold DRight $ leftmost [DLeft <$ eAPressed, DRight <$ eDPressed]
+    playerDir <- hold DRight $ leftmost
+        [ DLeft <$ eAPressed
+        , DRight <$ eDPressed
+        , ePadChangeDir
+        ]
 
-    let playerKeyAccX = controlVx playerSpeed <$> aPressed <*> dPressed
-        playerAccX = case mAxis of
-            Nothing -> playerKeyAccX
-            Just axis -> (* playerSpeed) <$> axis
-        playerAirForce = controlVx 1000 <$> aPressed <*> dPressed
-        playerAcc = H.Vector <$> playerAccX <*> pure 0
+    let playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
+        playerMovement = fromMaybe playerKeyMovement mAxis
+        playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
+        playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
         ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
 
-        jumpEvent = (-1500) <$ gate playerOnGround ePlayerWantsToJump
+        jumpEvent = (-1000) <$ gate playerOnGround ePlayerWantsToJump
         pickFirst True x _ = x
         pickFirst False _ x = x
 
-        playerSurfaceVelocity = pickFirst <$> playerOnGround <*> playerAcc <*> pure (H.Vector 0 0)
+        playerSurfaceVelocity = pickFirst
+            <$> playerOnGround <*> playerAcc <*> pure (H.Vector 0 0)
         playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
 
     return LogicOutput
         { playerSurfaceVel = playerSurfaceVelocity
-        , playerForce = pickFirst <$> playerOnGround <*> pure (H.Vector 0 0) <*> playerAirForce
+        , playerForce = pickFirst
+            <$> playerOnGround <*> pure (H.Vector 0 0) <*> playerAirForce
         , playerYImpulse = jumpEvent
         , debugRenderingEnabled = debugRendering
         , debugRenderCharacters = characterDbg
@@ -241,8 +245,7 @@ main = do
     SDL.initializeAll
 
     let windowSettings = SDL.defaultWindow
-            { SDL.windowInitialSize = winSize
-            , SDL.windowResizable = True
+            { SDL.windowResizable = True
             }
     window <- SDL.createWindow "Ava" windowSettings
     textureRenderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
@@ -299,9 +302,9 @@ main = do
     H.spaceAdd space $ H.Static shelf
 
     let tl = H.Vector 0 0
-        bl = H.Vector 0 winHeight
-        tr = H.Vector winWidth 0
-        br = H.Vector winWidth winHeight
+        bl = H.Vector 0 400
+        tr = H.Vector 400 0
+        br = H.Vector 400 400
 
         corners = [tl, bl, br, tr]
         edges = zip corners $ tail corners ++ [head corners]
@@ -445,7 +448,9 @@ main = do
                 fromMaybe (return ()) $ do
                     gamepad <- mGamepad
                     setAxis <- mSetAxis
-                    Just $ setAxis =<< (\ap -> fromIntegral ap / 32767) <$> SDL.axisPosition gamepad 0
+                    let gateV v = if abs v < 0.15 then 0 else v
+                    Just $ setAxis =<< gateV . (/ 32768) . fromIntegral
+                        <$> SDL.axisPosition gamepad 0
 
                 mSdlTrigger <- liftIO $ readIORef sdlTriggerRef
                 mQuit <- case mSdlTrigger of
