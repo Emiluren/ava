@@ -179,10 +179,10 @@
                 </key>
             </timeline>
             <timeline id="15" obj="1" name="bone_001" object_type="bone">
-                <key id="0">
-                    <bone x="10.181415" y="0.128331" angle="351.712675"/>
+                <key id="0" spin="-1">
+                    <bone x="10.181415" y="0.128331" angle="357.973688"/>
                 </key>
-                <key id="1" time="500" spin="-1">
+                <key id="1" time="500">
                     <bone x="10.181415" y="0.128331" angle="354.387821"/>
                 </key>
             </timeline>

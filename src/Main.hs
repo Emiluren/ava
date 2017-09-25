@@ -61,7 +61,7 @@ timeStep = 1/120
 
 shelfStart, shelfEnd :: Num a => (a, a)
 shelfStart = (100, 200)
-shelfEnd = (300, 350)
+shelfEnd = (300, 320)
 
 makeHVector :: (Double, Double) -> H.Vector
 makeHVector = uncurry H.Vector
@@ -110,7 +110,7 @@ isKeyPressed key event =
             False
 
 playerSpeed :: Double
-playerSpeed = 500
+playerSpeed = 200
 
 controlVx :: Num a => a -> Bool -> Bool -> a
 controlVx x True False = -x
@@ -234,7 +234,7 @@ renderTextureSize :: Num a => a
 renderTextureSize = 512
 
 mutableBehavior :: (Ref m ~ Ref IO, MonadRef m, MonadReflexHost t m)
-    => Double -> m (Behavior t Double, Double -> m ())
+    => a -> m (Behavior t a, a -> m ())
 mutableBehavior startValue = do
     (eUpdateValue, eUpdateValueTriggerRef) <- newEventWithTriggerRef
     time <- runHostFrame $ hold startValue eUpdateValue
@@ -312,7 +312,7 @@ main = do
         tr = H.Vector 400 0
         br = H.Vector 400 400
 
-        corners = [tl, bl, br, tr]
+        corners = [tl, H.Vector (-200) (-10), H.Vector (-200) 360, bl, H.Vector 150 380, br, tr]
         edges = zip corners $ tail corners ++ [head corners]
 
     wallShapes <- forM edges $ \(start, end) -> do
@@ -352,7 +352,7 @@ main = do
         characterMass = 5
 
     mummyBody <- H.newBody characterMass H.infinity
-    H.maxVelocity mummyBody $= playerSpeed
+    --H.maxVelocity mummyBody $= playerSpeed
     H.spaceAdd space mummyBody
     mummyFeetShape <- H.newShape mummyBody characterFeetShapeType (H.Vector 0 $ -characterWidth * 0.2)
     mummyBodyShape <- H.newShape mummyBody characterBodyShapeType (H.Vector 0 0)
@@ -364,13 +364,13 @@ main = do
     --H.collisionType mummyFeetShape $= playerFeetCollisionType
 
     playerBody <- H.newBody characterMass H.infinity
-    H.maxVelocity playerBody $= playerSpeed
+    --H.maxVelocity playerBody $= playerSpeed
     H.spaceAdd space playerBody
     playerFeetShape <- H.newShape playerBody characterFeetShapeType (H.Vector 0 $ -characterWidth * 0.2)
     playerBodyShape <- H.newShape playerBody characterBodyShapeType (H.Vector 0 0)
     H.spaceAdd space playerFeetShape
     H.spaceAdd space playerBodyShape
-    H.friction playerFeetShape $= 2
+    H.friction playerFeetShape $= 3
     H.friction playerBodyShape $= 0
     H.position playerBody $= H.Vector 240 50
     H.collisionType playerFeetShape $= playerFeetCollisionType
