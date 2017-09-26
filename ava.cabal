@@ -18,9 +18,12 @@ executable ava
   main-is:             Main.hs
   other-modules:       SpriterBindings
                      , SpriterTypes
+                     , ChipmunkBindings
+                     , ChipmunkTypes
   default-language:    Haskell2010
-  extra-libraries:     spriterengine stdc++
+  extra-libraries:     spriterengine chipmunk pthread stdc++
   c-sources:           src/SpriterBindings.cpp
+                     , src/ChipmunkBindings.c
                      , src/jsonspriterfiledocumentwrapper.cpp
                      , src/jsonspriterfileattributewrapper.cpp
                      , src/jsonspriterfileelementwrapper.cpp
@@ -29,7 +32,6 @@ executable ava
                      , dependent-sum
                      , dependent-sum-template
                      , dependent-map
-                     , Hipmunk
                      , inline-c
                      , inline-c-cpp
                      , lens

@@ -16,12 +16,12 @@ import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Maybe (isJust, fromMaybe)
 import Data.StateVar (($=), get)
 import qualified Data.Vector as Vector
-import Data.Word (Word32)
+import qualified Data.Vector.Storable as V
 
 import Foreign.C.String (CString, withCString, peekCString)
-import Foreign.C.Types (CInt, CFloat(..), CDouble(..))
+import Foreign.C.Types (CInt, CUInt, CFloat(..), CDouble(..))
 import Foreign.Marshal.Alloc (free)
-import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr)
+import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr, nullFunPtr)
 import Foreign.StablePtr
     ( newStablePtr
     , deRefStablePtr
@@ -35,7 +35,8 @@ import GHC.Float (float2Double)
 
 import Linear (V2(..), V4(..))
 
-import qualified Physics.Hipmunk as H
+import qualified ChipmunkBindings as H
+import qualified ChipmunkTypes as H
 
 import Reflex
 import Reflex.Host.Class
@@ -63,7 +64,7 @@ shelfStart, shelfEnd :: Num a => (a, a)
 shelfStart = (100, 200)
 shelfEnd = (300, 320)
 
-makeHVector :: (Double, Double) -> H.Vector
+makeHVector :: (CDouble, CDouble) -> H.Vector
 makeHVector = uncurry H.Vector
 
 makeSdlPoint :: Num a => (a, a) -> SDL.Point V2 a
@@ -109,7 +110,7 @@ isKeyPressed key event =
         _ ->
             False
 
-playerSpeed :: Double
+playerSpeed :: CDouble
 playerSpeed = 200
 
 controlVx :: Num a => a -> Bool -> Bool -> a
@@ -123,13 +124,13 @@ frameTime = 0.05
 playerFrames :: Int
 playerFrames = 10
 
-playerFeetCollisionType :: Word32
+playerFeetCollisionType :: CUInt
 playerFeetCollisionType = 1
 
 data LogicOutput t = LogicOutput
     { playerSurfaceVel :: Behavior t H.Vector
     , playerForce :: Behavior t H.Vector
-    , playerYImpulse :: Event t Double
+    , playerYImpulse :: Event t H.CpFloat
     , debugRenderingEnabled :: Behavior t Bool
     , debugRenderCharacters :: Behavior t Bool
     , playerAnimation :: Behavior t String
@@ -193,7 +194,7 @@ mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
-    playerOnGround <- hold False ePlayerTouchGround
+    playerOnGround <- hold True ePlayerTouchGround
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     playerDir <- hold DRight $ leftmost
@@ -203,7 +204,7 @@ mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
         ]
 
     let playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
-        playerMovement = fromMaybe playerKeyMovement mAxis
+        playerMovement = CDouble <$> fromMaybe playerKeyMovement mAxis
         playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
         playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
         ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
@@ -262,7 +263,7 @@ main = do
             name <- peekCString filename
 
             tex <- SDL.Image.loadTexture textureRenderer name
-            putStrLn $ "Loaded " ++ name
+            putStrLn $ "Loaded: " ++ name
 
             let sprite = Spriter.Sprite
                     { Spriter._spriteTexture = tex
@@ -291,21 +292,18 @@ main = do
     mummyEntityInstance <- withCString "Mummy" $ Spriter.modelGetNewEntityInstance mummySpriterModel
     withCString "Idle" $ Spriter.entityInstanceSetCurrentAnimation mummyEntityInstance
 
-    putStrLn "Initializing chipmunk"
-    H.initChipmunk
-
     putStrLn "Creating chipmunk space"
     space <- H.newSpace
     H.gravity space $= H.Vector 0 400
 
-    wall <- H.newBody H.infinity H.infinity
-    H.position wall $= H.Vector 0 0
+    wall <- H.spaceGetStaticBody space
+    --H.position wall $= H.Vector 0 0
 
     let shelfShapeType = H.LineSegment startV endV 1
-    shelf <- H.newShape wall shelfShapeType (H.Vector 0 0)
+    shelf <- H.newShape wall shelfShapeType
     H.friction shelf $= 1.0
     H.elasticity shelf $= 0.6
-    H.spaceAdd space $ H.Static shelf
+    H.spaceAddShape space shelf
 
     let tl = H.Vector 0 0
         bl = H.Vector 0 400
@@ -317,22 +315,22 @@ main = do
 
     wallShapes <- forM edges $ \(start, end) -> do
         let wst = H.LineSegment start end 1
-        w <- H.newShape wall wst (H.Vector 0 0)
+        w <- H.newShape wall wst
         H.friction w $= 1.0
         H.elasticity w $= 0.6
-        H.spaceAdd space $ H.Static w
+        H.spaceAddShape space w
         return (w, wst)
 
     let circleMoment = H.momentForCircle circleMass (0, circleRadius) (H.Vector 0 0)
 
     circleBody <- H.newBody circleMass circleMoment
-    H.spaceAdd space circleBody
+    H.spaceAddBody space circleBody
 
-    let circleShapeType = H.Circle circleRadius
-    circleShape <- H.newShape circleBody circleShapeType (H.Vector 0 0)
+    let circleShapeType = H.Circle circleRadius H.zero
+    circleShape <- H.newShape circleBody circleShapeType
     H.friction circleShape $= 1.0
     H.elasticity circleShape $= 0.9
-    H.spaceAdd space circleShape
+    H.spaceAddShape space circleShape
     H.position circleBody $= H.Vector 200 20
 
     let makeCharacterBody w h =
@@ -347,59 +345,56 @@ main = do
             ]
         characterWidth = 10
         characterHeight = 30
-        characterFeetShapeType = H.Circle $ characterWidth * 0.3
-        characterBodyShapeType = H.Polygon $ reverse $ makeCharacterBody characterWidth characterHeight
+        characterFeetShapeType = H.Circle (characterWidth * 0.3) (H.Vector 0 $ -characterWidth * 0.2)
+        characterBodyShapeType = H.Polygon (V.fromList $ reverse $ makeCharacterBody characterWidth characterHeight) 0
         characterMass = 5
 
-    mummyBody <- H.newBody characterMass H.infinity
-    --H.maxVelocity mummyBody $= playerSpeed
-    H.spaceAdd space mummyBody
-    mummyFeetShape <- H.newShape mummyBody characterFeetShapeType (H.Vector 0 $ -characterWidth * 0.2)
-    mummyBodyShape <- H.newShape mummyBody characterBodyShapeType (H.Vector 0 0)
-    H.spaceAdd space mummyFeetShape
-    H.spaceAdd space mummyBodyShape
+    mummyBody <- H.newBody characterMass $ 1/0
+    H.spaceAddBody space mummyBody
+    mummyFeetShape <- H.newShape mummyBody characterFeetShapeType
+    mummyBodyShape <- H.newShape mummyBody characterBodyShapeType
+    H.spaceAddShape space mummyFeetShape
+    H.spaceAddShape space mummyBodyShape
     H.friction mummyFeetShape $= 2
     H.friction mummyBodyShape $= 0
     H.position mummyBody $= H.Vector 100 200
     --H.collisionType mummyFeetShape $= playerFeetCollisionType
 
-    playerBody <- H.newBody characterMass H.infinity
-    --H.maxVelocity playerBody $= playerSpeed
-    H.spaceAdd space playerBody
-    playerFeetShape <- H.newShape playerBody characterFeetShapeType (H.Vector 0 $ -characterWidth * 0.2)
-    playerBodyShape <- H.newShape playerBody characterBodyShapeType (H.Vector 0 0)
-    H.spaceAdd space playerFeetShape
-    H.spaceAdd space playerBodyShape
+    playerBody <- H.newBody characterMass (1/0)
+    H.spaceAddBody space playerBody
+    playerFeetShape <- H.newShape playerBody characterFeetShapeType
+    playerBodyShape <- H.newShape playerBody characterBodyShapeType
+    H.spaceAddShape space playerFeetShape
+    H.spaceAddShape space playerBodyShape
     H.friction playerFeetShape $= 3
     H.friction playerBodyShape $= 0
     H.position playerBody $= H.Vector 240 50
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        render :: MonadIO m => V2 Double -> V2 Double -> V2 Double -> Bool -> Bool -> m ()
+        render :: MonadIO m => V2 CDouble -> V2 Double -> V2 Double -> Bool -> Bool -> m ()
         render camPos playerPos mummyPos debugRendering characterDbg = do
             SDL.rendererRenderTarget textureRenderer $= Just renderTexture
             SDL.rendererDrawColor textureRenderer $= V4 150 150 200 255
             SDL.clear textureRenderer
 
             liftIO $ do
-                Spriter.setEntityInstancePosition playerEntityInstance (CDouble <$> playerPos - camPos)
+                Spriter.setEntityInstancePosition playerEntityInstance ((CDouble <$> playerPos) - camPos)
                 Spriter.renderEntityInstance playerEntityInstance
 
-                Spriter.setEntityInstancePosition mummyEntityInstance (CDouble <$> mummyPos - camPos)
+                Spriter.setEntityInstancePosition mummyEntityInstance ((CDouble <$> mummyPos) - camPos)
                 Spriter.renderEntityInstance mummyEntityInstance
 
             when debugRendering $ do
-                renderShape textureRenderer camPos shelf shelfShapeType $ H.Vector 0 0
-                renderShape textureRenderer camPos circleShape circleShapeType $ H.Vector 0 0
+                renderShape textureRenderer camPos shelf shelfShapeType
+                renderShape textureRenderer camPos circleShape circleShapeType
 
                 forM_ wallShapes $ \(shape, shapeType) ->
-                    renderShape textureRenderer camPos shape shapeType $ H.Vector 0 0
+                    renderShape textureRenderer camPos shape shapeType
 
                 when characterDbg $ do
-                    renderShape textureRenderer camPos playerFeetShape characterFeetShapeType $
-                        H.Vector 0 $ - characterWidth * 0.2
-                    renderShape textureRenderer camPos playerBodyShape characterBodyShapeType $ H.Vector 0 0
+                    renderShape textureRenderer camPos playerFeetShape characterFeetShapeType
+                    renderShape textureRenderer camPos playerBodyShape characterBodyShapeType
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
@@ -427,18 +422,18 @@ main = do
             Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior 0
 
         logicOutput <- mainReflex (fan sdlEvent) time ePlayerGroundCollision mAxis
-        let playerTouchGroundCallback = do
-                liftIO $ runSpiderHost $ fireEventRef ePlayerGroundCollisionRef True
-                return True
+        playerTouchGroundCallback <- liftIO $ H.makeBeginHandler $ do
+            runSpiderHost $ fireEventRef ePlayerGroundCollisionRef True
+            return True
 
-            playerLeaveGroundCallback =
-                liftIO $ runSpiderHost $ fireEventRef ePlayerGroundCollisionRef False
+        playerLeaveGroundCallback <- liftIO $ H.makeSeparateHandler $
+            runSpiderHost $ fireEventRef ePlayerGroundCollisionRef False
 
-            playerGroundCollisionHandler = H.Handler
-                { H.beginHandler = Just playerTouchGroundCallback
-                , H.preSolveHandler = Nothing
-                , H.postSolveHandler = Nothing
-                , H.separateHandler = Just playerLeaveGroundCallback
+        let playerGroundCollisionHandler = H.Handler
+                { H.beginHandler = playerTouchGroundCallback
+                , H.preSolveHandler = nullFunPtr
+                , H.postSolveHandler = nullFunPtr
+                , H.separateHandler = playerLeaveGroundCallback
                 }
 
         liftIO $ H.addCollisionHandler space 0 playerFeetCollisionType playerGroundCollisionHandler
@@ -464,7 +459,7 @@ main = do
                     timeAcc' = timeAcc + dt
                     stepsToRun = timeAcc' `div'` timeStep
 
-                liftIO $ replicateM_ stepsToRun $ H.step space timeStep
+                liftIO $ replicateM_ stepsToRun $ H.step space $ CDouble timeStep
                 updateTime newTime
 
                 fromMaybe (return ()) $ do
@@ -487,7 +482,7 @@ main = do
                 H.surfaceVel playerFeetShape $= H.scale currentPlayerSurfaceVel (-1)
 
                 currentPlayerForce <- hSample $ playerForce logicOutput
-                liftIO $ H.applyOnlyForce playerBody currentPlayerForce (H.Vector 0 0)
+                H.force playerBody $= currentPlayerForce
 
                 currentPlayerAnimation <- hSample $ playerAnimation logicOutput
                 liftIO $ withCString currentPlayerAnimation $
@@ -498,8 +493,8 @@ main = do
                     Spriter.entityInstanceSetTimeElapsed playerEntityInstance spriterTimeStep
                     Spriter.entityInstanceSetTimeElapsed mummyEntityInstance spriterTimeStep
 
-                (H.Vector playerX playerY) <- get $ H.position playerBody
-                (H.Vector mummyX mummyY) <- get $ H.position mummyBody
+                (H.Vector (CDouble playerX) (CDouble playerY)) <- get $ H.position playerBody
+                (H.Vector (CDouble mummyX) (CDouble mummyY)) <- get $ H.position mummyBody
 
                 isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput
                 characterDbg <- hSample $ debugRenderCharacters logicOutput
@@ -510,7 +505,7 @@ main = do
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
 
                 render
-                    (V2 playerX playerY - camOffset)
+                    (CDouble <$> V2 playerX playerY - camOffset)
                     (V2 playerX playerY)
                     (V2 mummyX mummyY)
                     isDebugRenderingEnabled
@@ -521,6 +516,10 @@ main = do
                     appLoop newTime $ timeAcc' - fromIntegral stepsToRun * timeStep
 
         appLoop startTime 0.0
+
+        liftIO $ do
+            freeHaskellFunPtr playerTouchGroundCallback
+            freeHaskellFunPtr playerLeaveGroundCallback
 
     spriterImages <- readIORef loadedImages
     forM_ spriterImages $ \sprPtr -> do
@@ -567,10 +566,11 @@ renderSprite textureRenderer spritePtr spriteStatePtr = do
 convV :: H.Vector -> SDL.Point V2 CInt
 convV (H.Vector x y) = SDL.P $ V2 (floor x) (floor y)
 
-renderShape :: MonadIO m => SDL.Renderer -> V2 Double -> H.Shape -> H.ShapeType -> H.Vector -> m ()
-renderShape textureRenderer (V2 camX camY) shape (H.Circle radius) offset = do
-    pos <- get $ H.position $ H.body shape
-    angle <- get $ H.angle $ H.body shape
+renderShape :: MonadIO m => SDL.Renderer -> V2 CDouble -> (Ptr H.Shape) -> H.ShapeType -> m ()
+renderShape textureRenderer (V2 camX camY) shape (H.Circle radius offset) = do
+    body <- get $ H.shapeBody shape
+    pos <- get $ H.position $ body
+    angle <- get $ H.angle $ body
 
     let (H.Vector px py) = pos + H.rotate offset (H.fromAngle angle)
         sdlPos = V2 (floor $ px - camX) (floor $ py - camY)
@@ -581,17 +581,19 @@ renderShape textureRenderer (V2 camX camY) shape (H.Circle radius) offset = do
     SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
     SDL.circle textureRenderer sdlPos (floor radius) (V4 255 255 255 255)
     SDL.drawLine textureRenderer (SDL.P sdlPos) edgePoint
-renderShape textureRenderer (V2 camX camY) shape (H.LineSegment p1 p2 _) offset = do
-    pos <- get $ H.position $ H.body shape
+renderShape textureRenderer (V2 camX camY) shape (H.LineSegment p1 p2 _) = do
+    body <- get $ H.shapeBody shape
+    pos <- get $ H.position $ body
     SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
     let camV = H.Vector camX camY
-    SDL.drawLine textureRenderer (convV $ p1 + offset + pos - camV) (convV $ p2 + offset + pos - camV)
-renderShape textureRenderer (V2 camX camY) shape (H.Polygon verts) offset = do
-    pos <- get $ H.position $ H.body shape
-    angle <- get $ H.angle $ H.body shape
+    SDL.drawLine textureRenderer (convV $ p1 + pos - camV) (convV $ p2 + pos - camV)
+renderShape textureRenderer (V2 camX camY) shape (H.Polygon verts _radius) = do
+    body <- get $ H.shapeBody shape
+    pos <- get $ H.position $ body
+    angle <- get $ H.angle $ body
     let camV = H.Vector camX camY
         rot = H.rotate $ H.fromAngle angle
-        sdlVerts = map (\v -> convV $ rot (v + offset) + pos - camV) verts
+        sdlVerts = map (\v -> convV $ rot v + pos - camV) $ V.toList verts
     SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
 
     -- Would crash if there was a polygon without vertices but that should be impossible
