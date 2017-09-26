@@ -6,7 +6,7 @@ import qualified Data.Map as Map
 import qualified Data.Vector.Storable as V
 import Foreign.C.Types (CDouble, CUInt)
 import Foreign.Storable
-import Foreign.Ptr (FunPtr)
+import Foreign.Ptr (Ptr, FunPtr)
 import qualified Language.C.Inline as C
 import Language.C.Inline.Context (ctxTypesTable)
 import Language.C.Types (TypeSpecifier(..))
@@ -40,22 +40,28 @@ scale (Vector x y) s = Vector (x * s) (y * s)
 data Space
 data Body
 data Shape
+data Arbiter
 
 data ShapeType
     = LineSegment Vector Vector CpFloat
     | Circle CpFloat Vector
     | Polygon (V.Vector Vector) CpFloat
 
-type BeginHandler = IO Bool
-type PreSolveHandler = IO Bool
-type PostSolveHandler = IO ()
-type SeparateHandler = IO ()
+type BeginHandler = Ptr Arbiter -> IO Bool
+type PreSolveHandler = Ptr Arbiter -> IO Bool
+type PostSolveHandler = Ptr Arbiter -> IO ()
+type SeparateHandler = Ptr Arbiter -> IO ()
+
+type BeginHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO Bool
+type PreSolveHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO Bool
+type PostSolveHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO ()
+type SeparateHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO ()
 
 data Handler = Handler
-    { beginHandler :: FunPtr BeginHandler
-    , preSolveHandler :: FunPtr PreSolveHandler
-    , postSolveHandler :: FunPtr PostSolveHandler
-    , separateHandler :: FunPtr SeparateHandler
+    { beginHandler :: FunPtr BeginHandlerFun
+    , preSolveHandler :: FunPtr PreSolveHandlerFun
+    , postSolveHandler :: FunPtr PostSolveHandlerFun
+    , separateHandler :: FunPtr SeparateHandlerFun
     }
 
 cpCtx :: C.Context
@@ -69,4 +75,6 @@ chipmunkTypeTable = Map.fromList
     , (TypeName "cpBody", [t| Body |])
     , (TypeName "cpShape", [t| Shape |])
     , (TypeName "cpVect", [t| Vector |])
+    , (TypeName "cpBool", [t| Bool |])
+    , (TypeName "cpArbiter", [t| Arbiter |])
     ]

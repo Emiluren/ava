@@ -422,12 +422,12 @@ main = do
             Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior 0
 
         logicOutput <- mainReflex (fan sdlEvent) time ePlayerGroundCollision mAxis
-        playerTouchGroundCallback <- liftIO $ H.makeBeginHandler $ do
+        playerTouchGroundCallback <- liftIO $ H.makeBeginHandler $ (\_arbiter -> do
             runSpiderHost $ fireEventRef ePlayerGroundCollisionRef True
-            return True
+            return True)
 
         playerLeaveGroundCallback <- liftIO $ H.makeSeparateHandler $
-            runSpiderHost $ fireEventRef ePlayerGroundCollisionRef False
+            (\_arbiter -> runSpiderHost $ fireEventRef ePlayerGroundCollisionRef False)
 
         let playerGroundCollisionHandler = H.Handler
                 { H.beginHandler = playerTouchGroundCallback

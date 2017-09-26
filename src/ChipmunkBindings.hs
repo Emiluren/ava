@@ -37,17 +37,20 @@ fromAngle a = unsafePerformIO $ alloca fromA
             [C.exp| void { *$(cpVect* vec) = cpvforangle($(double a)) } |]
             peek vec
 
-makeBeginHandler :: BeginHandler -> IO (FunPtr BeginHandler)
-makeBeginHandler = $(C.mkFunPtr [t| BeginHandler |])
+skipTwo :: (a -> b) -> (a -> c -> d -> b)
+skipTwo f = (\x _ _ -> f x)
 
-makePreSolveHandler :: PreSolveHandler -> IO (FunPtr PreSolveHandler)
-makePreSolveHandler = $(C.mkFunPtr [t| PreSolveHandler |])
+makeBeginHandler :: BeginHandler -> IO (FunPtr BeginHandlerFun)
+makeBeginHandler = $(C.mkFunPtr [t| BeginHandlerFun |]) . skipTwo
 
-makePostSolveHandler :: PostSolveHandler -> IO (FunPtr PostSolveHandler)
-makePostSolveHandler = $(C.mkFunPtr [t| PostSolveHandler |])
+makePreSolveHandler :: PreSolveHandler -> IO (FunPtr PreSolveHandlerFun)
+makePreSolveHandler = $(C.mkFunPtr [t| PreSolveHandlerFun |]) . skipTwo
 
-makeSeparateHandler :: SeparateHandler -> IO (FunPtr SeparateHandler)
-makeSeparateHandler = $(C.mkFunPtr [t| SeparateHandler |])
+makePostSolveHandler :: PostSolveHandler -> IO (FunPtr PostSolveHandlerFun)
+makePostSolveHandler = $(C.mkFunPtr [t| PostSolveHandlerFun |]) . skipTwo
+
+makeSeparateHandler :: SeparateHandler -> IO (FunPtr SeparateHandlerFun)
+makeSeparateHandler = $(C.mkFunPtr [t| SeparateHandlerFun |]) . skipTwo
 
 newSpace :: IO (Ptr Space)
 newSpace = [C.exp| cpSpace* { cpSpaceNew() } |]
@@ -59,9 +62,21 @@ step :: Ptr Space -> CpFloat -> IO ()
 step space dt = [C.exp| void { cpSpaceStep($(cpSpace* space), $(double dt)) } |]
 
 addCollisionHandler :: Ptr Space -> CpCollisionType -> CpCollisionType -> Handler -> IO ()
-addCollisionHandler space colType1 colType2 (Handler bh preh posth seph) =
+addCollisionHandler space colType1 colType2 (Handler begh preh posth seph) =
     [C.block| void {
-            //TODO: implement
+                cpCollisionBeginFunc beginFunc = $(cpBool (*begh)(cpArbiter*, cpSpace*, void*));
+                cpCollisionPreSolveFunc preSolveFunc = $(cpBool (*preh)(cpArbiter*, cpSpace*, void*));
+                cpCollisionPostSolveFunc postSolveFunc = $(void (*posth)(cpArbiter*, cpSpace*, void*));
+                cpCollisionSeparateFunc separateFunc = $(void (*seph)(cpArbiter*, cpSpace*, void*));
+
+                cpCollisionHandler* handler = cpSpaceAddCollisionHandler($(cpSpace* space),
+                                                                         $(unsigned int colType1),
+                                                                         $(unsigned int colType2));
+
+                if (beginFunc != NULL) handler->beginFunc = beginFunc;
+                if (preSolveFunc != NULL) handler->preSolveFunc = preSolveFunc;
+                if (postSolveFunc != NULL) handler->postSolveFunc = postSolveFunc;
+                if (separateFunc != NULL) handler->separateFunc = separateFunc;
             }
         |]
 
