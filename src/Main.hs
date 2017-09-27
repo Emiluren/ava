@@ -175,11 +175,11 @@ mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
            => EventSelector t SdlEventTag
            -> Behavior t Double
            -> Behavior t Bool
+           -> Behavior t (SDL.Scancode -> Bool)
            -> Maybe (Behavior t Double)
            -> m (LogicOutput t)
-mainReflex sdlEvent _time playerOnGround mAxis = do
-    let pressedKeyB key = hold False $ isPress <$> select sdlEvent (KeyEvent key)
-        pressEvent kc = ffilter isPress $ select sdlEvent (KeyEvent kc)
+mainReflex sdlEvent _time playerOnGround pressedKeys mAxis = do
+    let pressEvent kc = ffilter isPress $ select sdlEvent (KeyEvent kc)
         eWPressed = pressEvent SDL.KeycodeW
         eF1Pressed = pressEvent SDL.KeycodeF1
         eF2Pressed = pressEvent SDL.KeycodeF2
@@ -192,8 +192,6 @@ mainReflex sdlEvent _time playerOnGround mAxis = do
         ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
             <$> ePadNotCenter
 
-    aPressed <- pressedKeyB SDL.KeycodeA
-    dPressed <- pressedKeyB SDL.KeycodeD
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     playerDir <- hold DRight $ leftmost
@@ -202,7 +200,9 @@ mainReflex sdlEvent _time playerOnGround mAxis = do
         , ePadChangeDir
         ]
 
-    let playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
+    let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
+        dPressed = ($ SDL.ScancodeD) <$> pressedKeys
+        playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
         playerMovement = CDouble <$> fromMaybe playerKeyMovement mAxis
         playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
         playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
@@ -409,8 +409,8 @@ main = do
 
         startTime <- SDL.time
         (time, updateTime) <- mutableBehavior startTime
-
         (playerOnGround, setPlayerOnGround) <- mutableBehavior False
+        (pressedKeys, updatePressedKeys) <- mutableBehavior =<< SDL.getKeyboardState
         playerOnGroundRef <- liftIO $ newIORef False
 
         joysticks <- SDL.availableJoysticks
@@ -422,7 +422,7 @@ main = do
             Nothing -> return (Nothing, Nothing)
             Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior 0
 
-        logicOutput <- mainReflex (fan sdlEvent) time playerOnGround mAxis
+        logicOutput <- mainReflex (fan sdlEvent) time playerOnGround pressedKeys mAxis
 
         playerArbiterCallback <- liftIO $ H.makeArbiterIterator $
             (\_ arb -> do
@@ -453,14 +453,15 @@ main = do
                     timeAcc' = timeAcc + dt
                     stepsToRun = timeAcc' `div'` timeStep
 
-                onGround <- liftIO $ do
-                    replicateM_ stepsToRun $ H.step space $ CDouble timeStep
+                liftIO $ replicateM_ stepsToRun $ H.step space $ CDouble timeStep
 
+                onGround <- liftIO $ do
                     writeIORef playerOnGroundRef False
                     H.bodyEachArbiter playerBody playerArbiterCallback
                     readIORef playerOnGroundRef
                 setPlayerOnGround onGround
 
+                updatePressedKeys =<< SDL.getKeyboardState
                 updateTime newTime
 
                 fromMaybe (return ()) $ do
