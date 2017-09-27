@@ -12,7 +12,7 @@ import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Sum ((==>), DSum(..))
 import Data.Fixed (div')
 import Data.GADT.Compare.TH
-import Data.IORef (newIORef, modifyIORef', readIORef)
+import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Maybe (isJust, fromMaybe)
 import Data.StateVar (($=), get)
 import qualified Data.Vector as Vector
@@ -21,7 +21,7 @@ import qualified Data.Vector.Storable as V
 import Foreign.C.String (CString, withCString, peekCString)
 import Foreign.C.Types (CInt, CUInt, CFloat(..), CDouble(..))
 import Foreign.Marshal.Alloc (free)
-import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr, nullFunPtr)
+import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr)
 import Foreign.StablePtr
     ( newStablePtr
     , deRefStablePtr
@@ -174,10 +174,10 @@ deriveGCompare ''SdlEventTag
 mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
            => EventSelector t SdlEventTag
            -> Behavior t Double
-           -> Event t Bool
+           -> Behavior t Bool
            -> Maybe (Behavior t Double)
            -> m (LogicOutput t)
-mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
+mainReflex sdlEvent _time playerOnGround mAxis = do
     let pressedKeyB key = hold False $ isPress <$> select sdlEvent (KeyEvent key)
         pressEvent kc = ffilter isPress $ select sdlEvent (KeyEvent kc)
         eWPressed = pressEvent SDL.KeycodeW
@@ -194,7 +194,6 @@ mainReflex sdlEvent _time ePlayerTouchGround mAxis = do
 
     aPressed <- pressedKeyB SDL.KeycodeA
     dPressed <- pressedKeyB SDL.KeycodeD
-    playerOnGround <- hold True ePlayerTouchGround
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     playerDir <- hold DRight $ leftmost
@@ -407,10 +406,12 @@ main = do
 
     runSpiderHost $ do
         (sdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
-        (ePlayerGroundCollision, ePlayerGroundCollisionRef) <- newEventWithTriggerRef
 
         startTime <- SDL.time
         (time, updateTime) <- mutableBehavior startTime
+
+        (playerOnGround, setPlayerOnGround) <- mutableBehavior False
+        playerOnGroundRef <- liftIO $ newIORef False
 
         joysticks <- SDL.availableJoysticks
         mGamepad <- if null joysticks
@@ -421,22 +422,15 @@ main = do
             Nothing -> return (Nothing, Nothing)
             Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior 0
 
-        logicOutput <- mainReflex (fan sdlEvent) time ePlayerGroundCollision mAxis
-        playerTouchGroundCallback <- liftIO $ H.makeBeginHandler $ (\_arbiter -> do
-            runSpiderHost $ fireEventRef ePlayerGroundCollisionRef True
-            return True)
+        logicOutput <- mainReflex (fan sdlEvent) time playerOnGround mAxis
 
-        playerLeaveGroundCallback <- liftIO $ H.makeSeparateHandler $
-            (\_arbiter -> runSpiderHost $ fireEventRef ePlayerGroundCollisionRef False)
-
-        let playerGroundCollisionHandler = H.Handler
-                { H.beginHandler = playerTouchGroundCallback
-                , H.preSolveHandler = nullFunPtr
-                , H.postSolveHandler = nullFunPtr
-                , H.separateHandler = playerLeaveGroundCallback
-                }
-
-        liftIO $ H.addCollisionHandler space 0 playerFeetCollisionType playerGroundCollisionHandler
+        playerArbiterCallback <- liftIO $ H.makeArbiterIterator $
+            (\_ arb -> do
+                    (s1, s2) <- H.arbiterGetShapes arb
+                    ct1 <- get $ H.collisionType s1
+                    ct2 <- get $ H.collisionType s2
+                    when (ct1 == 1 && ct2 == 0) $ writeIORef playerOnGroundRef True
+                    return ())
 
         let printJoysticks = do
                 joys <- SDL.availableJoysticks
@@ -459,7 +453,14 @@ main = do
                     timeAcc' = timeAcc + dt
                     stepsToRun = timeAcc' `div'` timeStep
 
-                liftIO $ replicateM_ stepsToRun $ H.step space $ CDouble timeStep
+                onGround <- liftIO $ do
+                    replicateM_ stepsToRun $ H.step space $ CDouble timeStep
+
+                    writeIORef playerOnGroundRef False
+                    H.bodyEachArbiter playerBody playerArbiterCallback
+                    readIORef playerOnGroundRef
+                setPlayerOnGround onGround
+
                 updateTime newTime
 
                 fromMaybe (return ()) $ do
@@ -517,9 +518,7 @@ main = do
 
         appLoop startTime 0.0
 
-        liftIO $ do
-            freeHaskellFunPtr playerTouchGroundCallback
-            freeHaskellFunPtr playerLeaveGroundCallback
+        liftIO $ freeHaskellFunPtr playerArbiterCallback
 
     spriterImages <- readIORef loadedImages
     forM_ spriterImages $ \sprPtr -> do

@@ -51,11 +51,34 @@ type BeginHandler = Ptr Arbiter -> IO Bool
 type PreSolveHandler = Ptr Arbiter -> IO Bool
 type PostSolveHandler = Ptr Arbiter -> IO ()
 type SeparateHandler = Ptr Arbiter -> IO ()
+type BodyArbiterIterator = Ptr Body -> Ptr Arbiter -> IO ()
 
 type BeginHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO Bool
 type PreSolveHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO Bool
 type PostSolveHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO ()
 type SeparateHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO ()
+type BodyArbiterIteratorFun = Ptr Body -> Ptr Arbiter -> Ptr () -> IO ()
+
+skipTwo :: (a -> b) -> (a -> c -> d -> b)
+skipTwo f = (\x _ _ -> f x)
+
+skipOne :: (a -> b -> c) -> (a -> b -> d -> c)
+skipOne f = (\x y _ -> f x y)
+
+makeBeginHandler :: BeginHandler -> IO (FunPtr BeginHandlerFun)
+makeBeginHandler = $(C.mkFunPtr [t| BeginHandlerFun |]) . skipTwo
+
+makePreSolveHandler :: PreSolveHandler -> IO (FunPtr PreSolveHandlerFun)
+makePreSolveHandler = $(C.mkFunPtr [t| PreSolveHandlerFun |]) . skipTwo
+
+makePostSolveHandler :: PostSolveHandler -> IO (FunPtr PostSolveHandlerFun)
+makePostSolveHandler = $(C.mkFunPtr [t| PostSolveHandlerFun |]) . skipTwo
+
+makeSeparateHandler :: SeparateHandler -> IO (FunPtr SeparateHandlerFun)
+makeSeparateHandler = $(C.mkFunPtr [t| SeparateHandlerFun |]) . skipTwo
+
+makeArbiterIterator :: BodyArbiterIterator -> IO (FunPtr BodyArbiterIteratorFun)
+makeArbiterIterator = $(C.mkFunPtr [t| BodyArbiterIteratorFun |]) . skipOne
 
 data Handler = Handler
     { beginHandler :: FunPtr BeginHandlerFun

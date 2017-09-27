@@ -37,21 +37,6 @@ fromAngle a = unsafePerformIO $ alloca fromA
             [C.exp| void { *$(cpVect* vec) = cpvforangle($(double a)) } |]
             peek vec
 
-skipTwo :: (a -> b) -> (a -> c -> d -> b)
-skipTwo f = (\x _ _ -> f x)
-
-makeBeginHandler :: BeginHandler -> IO (FunPtr BeginHandlerFun)
-makeBeginHandler = $(C.mkFunPtr [t| BeginHandlerFun |]) . skipTwo
-
-makePreSolveHandler :: PreSolveHandler -> IO (FunPtr PreSolveHandlerFun)
-makePreSolveHandler = $(C.mkFunPtr [t| PreSolveHandlerFun |]) . skipTwo
-
-makePostSolveHandler :: PostSolveHandler -> IO (FunPtr PostSolveHandlerFun)
-makePostSolveHandler = $(C.mkFunPtr [t| PostSolveHandlerFun |]) . skipTwo
-
-makeSeparateHandler :: SeparateHandler -> IO (FunPtr SeparateHandlerFun)
-makeSeparateHandler = $(C.mkFunPtr [t| SeparateHandlerFun |]) . skipTwo
-
 newSpace :: IO (Ptr Space)
 newSpace = [C.exp| cpSpace* { cpSpaceNew() } |]
 
@@ -195,6 +180,10 @@ angle body = makeStateVar getter setter
         getter = [C.exp| double { cpBodyGetAngle($(cpBody* body))} |]
         setter v = [C.exp| void { cpBodySetAngle($(cpBody* body), $(double v))} |]
 
+bodyEachArbiter :: Ptr Body -> FunPtr BodyArbiterIteratorFun -> IO ()
+bodyEachArbiter body func = [C.exp| void { cpBodyEachArbiter($(cpBody* body),
+                                                             $(void (*func)(cpBody*, cpArbiter*, void*)), NULL) } |]
+
 spaceGetStaticBody :: Ptr Space -> IO (Ptr Body)
 spaceGetStaticBody space = [C.exp| cpBody* { cpSpaceGetStaticBody($(cpSpace* space)) } |]
 
@@ -203,6 +192,17 @@ spaceAddShape space shape = [C.exp| void { cpSpaceAddShape($(cpSpace* space), $(
 
 spaceAddBody :: Ptr Space -> Ptr Body -> IO ()
 spaceAddBody space body = [C.exp| void { cpSpaceAddBody($(cpSpace* space), $(cpBody* body)) } |]
+
+arbiterGetShapes :: Ptr Arbiter -> IO (Ptr Shape, Ptr Shape)
+arbiterGetShapes arb = do
+    s1Ptr <- malloc
+    s2Ptr <- malloc
+    [C.exp| void { cpArbiterGetShapes($(cpArbiter* arb), $(cpShape** s1Ptr), $(cpShape** s2Ptr)) } |]
+    s1 <- peek s1Ptr
+    s2 <- peek s2Ptr
+    free s1Ptr
+    free s2Ptr
+    return (s1, s2)
 
 applyImpulse :: Ptr Body -> Vector -> Vector -> IO ()
 applyImpulse body impulse point =
