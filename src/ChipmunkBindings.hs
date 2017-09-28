@@ -18,6 +18,12 @@ C.include "<chipmunk/chipmunk.h>"
 zero :: Vector
 zero = Vector 0 0
 
+noGroup :: CpGroup
+noGroup = unsafePerformIO [C.exp| unsigned int { CP_NO_GROUP } |]
+
+allCategories :: CpBitmask
+allCategories = unsafePerformIO [C.exp| unsigned int { CP_ALL_CATEGORIES } |]
+
 rotate :: Vector -> Vector -> Vector
 rotate vec1 vec2 = unsafePerformIO $ rot
     where
@@ -193,6 +199,45 @@ spaceAddShape space shape = [C.exp| void { cpSpaceAddShape($(cpSpace* space), $(
 spaceAddBody :: Ptr Space -> Ptr Body -> IO ()
 spaceAddBody space body = [C.exp| void { cpSpaceAddBody($(cpSpace* space), $(cpBody* body)) } |]
 
+-- spaceSegmentQuery :: Ptr Space -> Vector -> Vector -> CpFloat -> ShapeFilter -> FunPtr SpaceSegmentQueryFun -> IO ()
+-- spaceSegmentQuery space start end radius filter func = do
+--     startPtr <- malloc
+--     endPtr <- malloc
+--     poke startPtr start
+--     poke endPtr end
+--     [C.exp| void {} |]
+--     free startPtr
+--     free endPtr
+
+spaceSegmentQueryFirst :: Ptr Space -> Vector -> Vector -> CpFloat -> ShapeFilter -> IO SegmentQueryInfo
+spaceSegmentQueryFirst space start end radius (ShapeFilter group categories mask) = do
+    startPtr <- malloc
+    endPtr <- malloc
+    infoPtr <- malloc
+
+    poke startPtr start
+    poke endPtr end
+    [C.block| void {
+            cpShapeFilter filter;
+            filter.group = $(unsigned int group);
+            filter.categories = $(unsigned int categories);
+            filter.mask = $(unsigned int mask);
+            cpSpaceSegmentQueryFirst($(cpSpace* space),
+                                     *$(cpVect* startPtr),
+                                     *$(cpVect* endPtr),
+                                     $(double radius),
+                                     filter,
+                                     $(cpSegmentQueryInfo* infoPtr));
+    } |]
+
+    info <- peek infoPtr
+
+    free startPtr
+    free endPtr
+    free infoPtr
+
+    return info
+
 arbiterGetShapes :: Ptr Arbiter -> IO (Ptr Shape, Ptr Shape)
 arbiterGetShapes arb = do
     s1Ptr <- malloc
@@ -205,14 +250,16 @@ arbiterGetShapes arb = do
     return (s1, s2)
 
 applyImpulse :: Ptr Body -> Vector -> Vector -> IO ()
-applyImpulse body impulse point =
-    let makeShape imp p = do
-            poke imp impulse
-            poke p point
-            [C.exp| void { cpBodyApplyImpulseAtLocalPoint($(cpBody* body),
-                                                          *$(cpVect* imp),
-                                                          *$(cpVect* p)) } |]
-    in alloca $ alloca . makeShape
+applyImpulse body impulse point = do
+    imp <- malloc
+    p <- malloc
+    poke imp impulse
+    poke p point
+    [C.exp| void { cpBodyApplyImpulseAtLocalPoint($(cpBody* body),
+                                                  *$(cpVect* imp),
+                                                  *$(cpVect* p)) } |]
+    free imp
+    free p
 
 momentForCircle :: CpFloat -> (CpFloat, CpFloat) -> Vector -> CpFloat
 momentForCircle m (r1, r2) offset = unsafePerformIO $ alloca mfc

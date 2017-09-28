@@ -1,12 +1,13 @@
 {-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables, FlexibleContexts, GADTs, TemplateHaskell #-}
 module Main where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Lens ((^.))
 import Control.Monad (unless, replicateM_)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Ref (Ref, MonadRef)
+import Control.Monad.Primitive (PrimMonad)
 
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
@@ -22,7 +23,7 @@ import qualified Data.Vector.Storable as V
 import Foreign.C.String (CString, withCString, peekCString)
 import Foreign.C.Types (CInt, CUInt, CFloat(..), CDouble(..))
 import Foreign.Marshal.Alloc (free)
-import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr)
+import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr, nullPtr)
 import Foreign.StablePtr
     ( newStablePtr
     , deRefStablePtr
@@ -47,6 +48,8 @@ import Reflex.Host.Class
     , subscribeEvent
     , readEvent
     , MonadReflexHost
+    , ReflexHost
+    , HostFrame
     )
 
 import SDL (Point(P))
@@ -128,25 +131,15 @@ playerFrames = 10
 playerFeetCollisionType :: CUInt
 playerFeetCollisionType = 1
 
-data LogicOutput t = LogicOutput
-    { playerSurfaceVel :: Behavior t H.Vector
-    , playerForce :: Behavior t H.Vector
-    , playerYImpulse :: Event t H.CpFloat
-    , debugRenderingEnabled :: Behavior t Bool
-    , debugRenderCharacters :: Behavior t Bool
-    , playerAnimation :: Behavior t String
-    , playerDirection :: Behavior t Direction
-    , quit :: Event t ()
-    , ePrint :: Event t String
-    , checkJoysticks :: Event t ()
-    }
-
 data SdlEventTag a where
     ControllerDeviceEvent :: SdlEventTag SDL.ControllerDeviceEventData
     JoyAxisEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyAxisEventData
     JoyButtonEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyButtonEventData
     KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
     OtherEvent :: SdlEventTag SDL.Event
+
+deriveGEq ''SdlEventTag
+deriveGCompare ''SdlEventTag
 
 newtype RenderState = RenderState
     { cameraPosition :: V2 Double
@@ -169,67 +162,26 @@ sortEvent event =
             OtherEvent ==> event
     where wrapInDMap x = DMap.fromList [x]
 
-deriveGEq ''SdlEventTag
-deriveGCompare ''SdlEventTag
+data LogicInput t = LogicInput
+    { sdlEvent :: EventSelector t SdlEventTag
+    , time :: Behavior t Double
+    , playerOnGround :: Behavior t Bool
+    , pressedKeys :: Behavior t (SDL.Scancode -> Bool)
+    , mPadAxis :: Maybe (Behavior t Double)
+    , mummyPosition :: Behavior t H.Vector
+    , eAiTick :: Event t ()
+    }
 
-mainReflex :: forall t m. (Reflex t, MonadHold t m, MonadFix m)
-           => EventSelector t SdlEventTag
-           -> Behavior t Double
-           -> Behavior t Bool
-           -> Behavior t (SDL.Scancode -> Bool)
-           -> Maybe (Behavior t Double)
-           -> m (LogicOutput t)
-mainReflex sdlEvent _time playerOnGround pressedKeys mAxis = do
-    let pressEvent kc = ffilter isPress $ select sdlEvent (KeyEvent kc)
-        eWPressed = pressEvent SDL.KeycodeW
-        eF1Pressed = pressEvent SDL.KeycodeF1
-        eF2Pressed = pressEvent SDL.KeycodeF2
-        eAPressed = pressEvent SDL.KeycodeA
-        eDPressed = pressEvent SDL.KeycodeD
-        padButtonPress = select sdlEvent (JoyButtonEvent 0)
-        padAxisMove = select sdlEvent (JoyAxisEvent 0)
-        ePadAPressed = ffilter (\(SDL.JoyButtonEventData _ b s) -> b == 0 && s == 1) padButtonPress
-        ePadNotCenter = ffilter (\(SDL.JoyAxisEventData _ a v) -> a == 0 && v /= 0) padAxisMove
-        ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
-            <$> ePadNotCenter
-
-    debugRendering <- current <$> toggle True eF1Pressed
-    characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
-    playerDir <- hold DRight $ leftmost
-        [ DLeft <$ eAPressed
-        , DRight <$ eDPressed
-        , ePadChangeDir
-        ]
-
-    let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
-        dPressed = ($ SDL.ScancodeD) <$> pressedKeys
-        playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
-        playerMovement = CDouble <$> fromMaybe playerKeyMovement mAxis
-        playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
-        playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
-        ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
-
-        jumpEvent = (-1000) <$ gate playerOnGround ePlayerWantsToJump
-        pickFirst True x _ = x
-        pickFirst False _ x = x
-
-        playerSurfaceVelocity = pickFirst
-            <$> playerOnGround <*> playerAcc <*> pure (H.Vector 0 0)
-        playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
-
-    return LogicOutput
-        { playerSurfaceVel = playerSurfaceVelocity
-        , playerForce = pickFirst
-            <$> playerOnGround <*> pure (H.Vector 0 0) <*> playerAirForce
-        , playerYImpulse = jumpEvent
-        , debugRenderingEnabled = debugRendering
-        , debugRenderCharacters = characterDbg
-        , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
-        , playerDirection = playerDir
-        , quit = () <$ pressEvent SDL.KeycodeQ
-        , ePrint = never
-        , checkJoysticks = () <$ pressEvent SDL.KeycodeH
-        }
+data LogicOutput t = LogicOutput
+    { playerSurfaceVel :: Behavior t H.Vector
+    , mummySurfaceVel :: Behavior t H.Vector
+    , playerForce :: Behavior t H.Vector
+    , debugRenderingEnabled :: Behavior t Bool
+    , debugRenderCharacters :: Behavior t Bool
+    , playerAnimation :: Behavior t String
+    , playerDirection :: Behavior t Direction
+    , quit :: Event t ()
+    }
 
 renderTextureSize :: Num a => a
 renderTextureSize = 512
@@ -238,8 +190,8 @@ mutableBehavior :: (Ref m ~ Ref IO, MonadRef m, MonadReflexHost t m)
     => a -> m (Behavior t a, a -> m ())
 mutableBehavior startValue = do
     (eUpdateValue, eUpdateValueTriggerRef) <- newEventWithTriggerRef
-    time <- runHostFrame $ hold startValue eUpdateValue
-    return (time, fireEventRef eUpdateValueTriggerRef)
+    value <- runHostFrame $ hold startValue eUpdateValue
+    return (value, fireEventRef eUpdateValueTriggerRef)
 
 delayEvent :: (TriggerEvent t m, PerformEvent t m, MonadIO (Performable m)) =>
     Event t a -> Int -> m (Event t a)
@@ -354,6 +306,7 @@ main = do
         characterFeetShapeType = H.Circle (characterWidth * 0.3) (H.Vector 0 $ -characterWidth * 0.2)
         characterBodyShapeType = H.Polygon (V.fromList $ reverse $ makeCharacterBody characterWidth characterHeight) 0
         characterMass = 5
+        characterFeetFriction = 2
 
     mummyBody <- H.newBody characterMass $ 1/0
     H.spaceAddBody space mummyBody
@@ -361,7 +314,7 @@ main = do
     mummyBodyShape <- H.newShape mummyBody characterBodyShapeType
     H.spaceAddShape space mummyFeetShape
     H.spaceAddShape space mummyBodyShape
-    H.friction mummyFeetShape $= 2
+    H.friction mummyFeetShape $= characterFeetFriction
     H.friction mummyBodyShape $= 0
     H.position mummyBody $= H.Vector 100 200
     --H.collisionType mummyFeetShape $= playerFeetCollisionType
@@ -372,9 +325,9 @@ main = do
     playerBodyShape <- H.newShape playerBody characterBodyShapeType
     H.spaceAddShape space playerFeetShape
     H.spaceAddShape space playerBodyShape
-    H.friction playerFeetShape $= 3
+    H.friction playerFeetShape $= characterFeetFriction
     H.friction playerBodyShape $= 0
-    H.position playerBody $= H.Vector 240 50
+    H.position playerBody $= H.Vector 240 100
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
@@ -412,12 +365,16 @@ main = do
             SDL.present textureRenderer
 
     runSpiderHost $ do
-        (sdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
+        (eSdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
+        (aiTick, aiTickTriggerRef) <- newEventWithTriggerRef
+        --(colForSeg, colForSegTriggerRef) <- newEventWithTriggerRef
 
         startTime <- SDL.time
-        (time, updateTime) <- mutableBehavior startTime
-        (playerOnGround, setPlayerOnGround) <- mutableBehavior False
-        (pressedKeys, updatePressedKeys) <- mutableBehavior =<< SDL.getKeyboardState
+        (gameTime, setTime) <- mutableBehavior startTime
+        (playerTouchingGround, setPlayerOnGround) <- mutableBehavior False
+        (keysPressed, setPressedKeys) <- mutableBehavior =<< SDL.getKeyboardState
+        (mummyPos, setMummyPos) <- mutableBehavior H.zero
+
         playerOnGroundRef <- liftIO $ newIORef False
 
         joysticks <- SDL.availableJoysticks
@@ -429,7 +386,95 @@ main = do
             Nothing -> return (Nothing, Nothing)
             Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior 0
 
-        logicOutput <- mainReflex (fan sdlEvent) time playerOnGround pressedKeys mAxis
+        let groundCheckFilter = H.ShapeFilter
+                { H.shapeFilterGroup = H.noGroup
+                , H.shapeFilterCategories = H.allCategories
+                , H.shapeFilterMask = H.allCategories
+                }
+
+            mainReflex :: (Ref m ~ Ref IO, ReflexHost t, MonadIO (HostFrame t), PrimMonad (HostFrame t), MonadHold t m) =>
+                LogicInput t -> PerformEventT t m (LogicOutput t)
+            mainReflex input = do
+                let pressEvent kc = ffilter isPress $ select (sdlEvent input) (KeyEvent kc)
+                    eWPressed = pressEvent SDL.KeycodeW
+                    eF1Pressed = pressEvent SDL.KeycodeF1
+                    eF2Pressed = pressEvent SDL.KeycodeF2
+                    eAPressed = pressEvent SDL.KeycodeA
+                    eDPressed = pressEvent SDL.KeycodeD
+                    padButtonPress = select (sdlEvent input) (JoyButtonEvent 0)
+                    padAxisMove = select (sdlEvent input) (JoyAxisEvent 0)
+                    ePadAPressed = ffilter (\(SDL.JoyButtonEventData _ b s) -> b == 0 && s == 1) padButtonPress
+                    ePadNotCenter = ffilter (\(SDL.JoyAxisEventData _ a v) -> a == 0 && v /= 0) padAxisMove
+                    ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
+                        <$> ePadNotCenter
+
+                    sideSegment pos = (pos + H.Vector characterWidth 20, pos + H.Vector characterWidth 0)
+                    mummyCheck = sideSegment <$> mummyPosition input <@ eAiTick input
+
+                debugRendering <- current <$> toggle True eF1Pressed
+                characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
+                playerDir <- hold DRight $ leftmost
+                    [ DLeft <$ eAPressed
+                    , DRight <$ eDPressed
+                    , ePadChangeDir
+                    ]
+                colForSeg <- performEvent $
+                    (\(s, e) -> liftIO $ H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
+                    <$> mummyCheck
+                mummyCanGoRight <- hold False $ (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForSeg
+
+                let aPressed = ($ SDL.ScancodeA) <$> pressedKeys input
+                    dPressed = ($ SDL.ScancodeD) <$> pressedKeys input
+                    playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
+                    playerMovement = CDouble <$> fromMaybe playerKeyMovement (mPadAxis input)
+                    playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
+                    playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
+                    ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
+
+                    jumpEvent = (-1000) <$ gate (playerOnGround input) ePlayerWantsToJump
+                    pickFirst True x _ = x
+                    pickFirst False _ x = x
+
+                    mummyGoRight True = H.Vector (- playerSpeed / 4) 0
+                    mummyGoRight False = H.zero
+
+                    playerSurfaceVelocity = pickFirst
+                        <$> playerOnGround input <*> playerAcc <*> pure (H.Vector 0 0)
+                    playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
+
+                    jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
+
+                performEvent_ $ jump <$> jumpEvent
+
+                return LogicOutput
+                    { playerSurfaceVel = playerSurfaceVelocity
+                    , mummySurfaceVel = mummyGoRight <$> mummyCanGoRight
+                    , playerForce = pickFirst
+                        <$> playerOnGround input <*> pure (H.Vector 0 0) <*> playerAirForce
+                    , debugRenderingEnabled = debugRendering
+                    , debugRenderCharacters = characterDbg
+                    , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
+                    , playerDirection = playerDir
+                    , quit = () <$ pressEvent SDL.KeycodeQ
+                    }
+
+        (logicOutput, FireCommand fire) <- hostPerformEventT $ mainReflex $ LogicInput
+            { sdlEvent = (fan eSdlEvent)
+            , time = gameTime
+            , playerOnGround = playerTouchingGround
+            , pressedKeys = keysPressed
+            , mPadAxis = mAxis
+            , mummyPosition = mummyPos
+            , eAiTick = aiTick
+            }
+
+        let fireAiTick = runSpiderHost $ do
+                mAsdfTrigger <- liftIO $ readIORef aiTickTriggerRef
+                case mAsdfTrigger of
+                    Nothing -> return []
+                    Just eTrigger -> fire [eTrigger :=> Identity ()] $ return Nothing
+
+            ticker = threadDelay (1000000 `div` 15) >> fireAiTick >> ticker
 
         playerArbiterCallback <- liftIO $ H.makeArbiterIterator $
             (\_ arb -> do
@@ -438,16 +483,6 @@ main = do
                     ct2 <- get $ H.collisionType s2
                     when (ct1 == 1 && ct2 == 0) $ writeIORef playerOnGroundRef True
                     return ())
-
-        let printJoysticks = do
-                joys <- SDL.availableJoysticks
-                liftIO $ print joys
-
-        (_, FireCommand fire) <- hostPerformEventT $ do
-            let jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
-            performEvent_ $ jump <$> playerYImpulse logicOutput
-            performEvent_ $ liftIO . putStrLn <$> ePrint logicOutput
-            performEvent_ $ printJoysticks <$ checkJoysticks logicOutput
 
         hQuit <- subscribeEvent $ quit logicOutput
 
@@ -462,14 +497,16 @@ main = do
 
                 liftIO $ replicateM_ stepsToRun $ H.step space $ CDouble timeStep
 
+                fireEventRef aiTickTriggerRef ()
+
                 onGround <- liftIO $ do
                     writeIORef playerOnGroundRef False
                     H.bodyEachArbiter playerBody playerArbiterCallback
                     readIORef playerOnGroundRef
                 setPlayerOnGround onGround
 
-                updatePressedKeys =<< SDL.getKeyboardState
-                updateTime newTime
+                setPressedKeys =<< SDL.getKeyboardState
+                setTime newTime
 
                 fromMaybe (return ()) $ do
                     gamepad <- mGamepad
@@ -497,13 +534,17 @@ main = do
                 liftIO $ withCString currentPlayerAnimation $
                     Spriter.entityInstanceSetCurrentAnimation playerEntityInstance
 
+                currentMummySurfaceVel <- hSample $ mummySurfaceVel logicOutput
+                H.surfaceVel mummyFeetShape $= currentMummySurfaceVel
+
                 let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ do
                     Spriter.entityInstanceSetTimeElapsed playerEntityInstance spriterTimeStep
                     Spriter.entityInstanceSetTimeElapsed mummyEntityInstance spriterTimeStep
 
                 (H.Vector (CDouble playerX) (CDouble playerY)) <- get $ H.position playerBody
-                (H.Vector (CDouble mummyX) (CDouble mummyY)) <- get $ H.position mummyBody
+                currentMummyPos@(H.Vector (CDouble mummyX) (CDouble mummyY)) <- get $ H.position mummyBody
+                setMummyPos currentMummyPos
 
                 isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput
                 characterDbg <- hSample $ debugRenderCharacters logicOutput
@@ -524,7 +565,9 @@ main = do
                 unless shouldQuit $
                     appLoop newTime $ timeAcc' - fromIntegral stepsToRun * timeStep
 
+        tickerId <- liftIO $ forkIO ticker
         appLoop startTime 0.0
+        liftIO $ killThread tickerId
 
         liftIO $ freeHaskellFunPtr playerArbiterCallback
 

@@ -1,5 +1,40 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings #-}
-module ChipmunkTypes where
+module ChipmunkTypes
+    ( CpFloat
+    , CpCollisionType
+    , CpGroup
+    , CpBitmask
+    , Vector(..)
+    , SegmentQueryInfo(..)
+    , ShapeFilter(..)
+    , Space
+    , Body
+    , Shape
+    , Arbiter
+    , ShapeType(..)
+
+    , BeginHandler
+    , PreSolveHandler
+    , PostSolveHandler
+    , SeparateHandler
+    , BodyArbiterIterator
+    , BeginHandlerFun
+    , PreSolveHandlerFun
+    , PostSolveHandlerFun
+    , SeparateHandlerFun
+    , BodyArbiterIteratorFun
+    , Handler(..)
+
+    , scale
+    , makeBeginHandler
+
+    , makePreSolveHandler
+    , makePostSolveHandler
+    , makeSeparateHandler
+    , makeArbiterIterator
+
+    , cpCtx
+    ) where
 
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -14,8 +49,10 @@ import qualified Language.Haskell.TH as TH
 
 type CpFloat = CDouble
 type CpCollisionType = CUInt
+type CpGroup = CUInt
+type CpBitmask = CUInt
 
-data Vector = Vector { cpVecX :: CpFloat, cpVecY :: CpFloat }
+data Vector = Vector { cpVecX :: CpFloat, cpVecY :: CpFloat } deriving Show
 instance Num Vector where
     (Vector x1 y1) + (Vector x2 y2) = Vector (x1 + x2) (y1 + y2)
     (Vector x1 y1) * (Vector x2 y2) = Vector (x1 * x2) (y1 * y2)
@@ -25,7 +62,7 @@ instance Num Vector where
     negate (Vector x y) = Vector (-x) (-y)
 
 instance Storable Vector where
-    sizeOf _ = 2 * sizeOf (undefined :: CDouble)
+    sizeOf _ = 2 * sizeOf (undefined :: CpFloat)
     alignment _ = 8
     peek ptr = Vector
         <$> peekByteOff ptr 0
@@ -33,6 +70,47 @@ instance Storable Vector where
     poke ptr (Vector x y) =
         pokeByteOff ptr 0 x
         >> pokeByteOff ptr 8 y
+
+data SegmentQueryInfo = SegmentQueryInfo
+    { segQueryInfoShape :: Ptr Shape
+    , segQueryInfoPoint :: Vector
+    , segQueryInfoNormal :: Vector
+    , segQueryInfoAlpha :: CpFloat
+    } deriving Show
+
+pointOffset, normalOffset, alphaOffset :: Int
+pointOffset = sizeOf (undefined :: Ptr Shape)
+normalOffset = pointOffset + sizeOf (undefined :: Vector)
+alphaOffset = normalOffset + sizeOf (undefined :: Vector)
+
+instance Storable SegmentQueryInfo where
+    sizeOf _ = sizeOf (undefined :: Ptr Shape) +
+               2 * sizeOf (undefined :: Vector) +
+               sizeOf (undefined :: CpFloat)
+    alignment _ = alignment (undefined :: Vector)
+    peek ptr = SegmentQueryInfo
+        <$> peekByteOff ptr 0
+        <*> peekByteOff ptr pointOffset
+        <*> peekByteOff ptr normalOffset
+        <*> peekByteOff ptr alphaOffset
+    poke ptr (SegmentQueryInfo shape point normal alpha) =
+        pokeByteOff ptr 0 shape
+        >> pokeByteOff ptr pointOffset point
+        >> pokeByteOff ptr normalOffset normal
+        >> pokeByteOff ptr alphaOffset alpha
+
+
+data ShapeFilter = ShapeFilter
+    -- Two objects with the same non-zero group value do not collide.
+    -- This is generally used to group objects in a composite object together to disable self collisions.
+    { shapeFilterGroup :: CpGroup
+    -- A bitmask of user definable categories that this object belongs to.
+    -- The category/mask combinations of both objects in a collision must agree for a collision to occur.
+    , shapeFilterCategories :: CpBitmask
+    -- A bitmask of user definable category types that this object object collides with.
+    -- The category/mask combinations of both objects in a collision must agree for a collision to occur.
+    , shapeFilterMask :: CpBitmask
+    } deriving Show
 
 scale :: Vector -> CpFloat -> Vector
 scale (Vector x y) s = Vector (x * s) (y * s)
@@ -100,4 +178,5 @@ chipmunkTypeTable = Map.fromList
     , (TypeName "cpVect", [t| Vector |])
     , (TypeName "cpBool", [t| Bool |])
     , (TypeName "cpArbiter", [t| Arbiter |])
+    , (TypeName "cpSegmentQueryInfo", [t| SegmentQueryInfo |])
     ]
