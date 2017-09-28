@@ -243,7 +243,7 @@ mutableBehavior startValue = do
 
 delayEvent :: (TriggerEvent t m, PerformEvent t m, MonadIO (Performable m)) =>
     Event t a -> Int -> m (Event t a)
-delayEvent evt delay = hostPerformEventT $
+delayEvent evt delay =
     let runAfterDelay x callback = liftIO $ forkIO (threadDelay delay >> callback x) >> return ()
     in performEventAsync (runAfterDelay <$> evt)
 
