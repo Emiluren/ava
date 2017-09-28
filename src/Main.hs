@@ -1,6 +1,7 @@
-{-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables, GADTs, TemplateHaskell #-}
+{-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables, FlexibleContexts, GADTs, TemplateHaskell #-}
 module Main where
 
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Lens ((^.))
 import Control.Monad (unless, replicateM_)
 import Control.Monad.Identity
@@ -239,6 +240,12 @@ mutableBehavior startValue = do
     (eUpdateValue, eUpdateValueTriggerRef) <- newEventWithTriggerRef
     time <- runHostFrame $ hold startValue eUpdateValue
     return (time, fireEventRef eUpdateValueTriggerRef)
+
+delayEvent :: (TriggerEvent t m, PerformEvent t m, MonadIO (Performable m)) =>
+    Event t a -> Int -> m (Event t a)
+delayEvent evt delay = hostPerformEventT $
+    let runAfterDelay x callback = liftIO $ forkIO (threadDelay delay >> callback x) >> return ()
+    in performEventAsync (runAfterDelay <$> evt)
 
 main :: IO ()
 main = do
