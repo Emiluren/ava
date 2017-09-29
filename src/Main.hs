@@ -9,10 +9,12 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Ref (Ref, MonadRef)
 import Control.Monad.Primitive (PrimMonad)
 
+import Data.Bool (bool)
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Sum ((==>), DSum(..))
 import Data.Fixed (div')
+import Data.Foldable (asum)
 import Data.GADT.Compare.TH
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Maybe (isJust, fromMaybe)
@@ -146,6 +148,8 @@ newtype RenderState = RenderState
     }
 
 data Direction = DLeft | DRight
+
+data AiDir = AiLeft | AiStay | AiRight deriving (Eq, Show)
 
 sortEvent :: SDL.Event -> DMap SdlEventTag Identity
 sortEvent event =
@@ -316,7 +320,7 @@ main = do
     H.spaceAddShape space mummyBodyShape
     H.friction mummyFeetShape $= characterFeetFriction
     H.friction mummyBodyShape $= 0
-    H.position mummyBody $= H.Vector 100 200
+    H.position mummyBody $= H.Vector 110 200
     --H.collisionType mummyFeetShape $= playerFeetCollisionType
 
     playerBody <- H.newBody characterMass (1/0)
@@ -367,7 +371,7 @@ main = do
     runSpiderHost $ do
         (eSdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
         (aiTick, aiTickTriggerRef) <- newEventWithTriggerRef
-        --(colForSeg, colForSegTriggerRef) <- newEventWithTriggerRef
+        --(colForRightSeg, colForSegTriggerRef) <- newEventWithTriggerRef
 
         startTime <- SDL.time
         (gameTime, setTime) <- mutableBehavior startTime
@@ -408,8 +412,17 @@ main = do
                     ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
                         <$> ePadNotCenter
 
-                    sideSegment pos = (pos + H.Vector characterWidth 20, pos + H.Vector characterWidth 0)
-                    mummyCheck = sideSegment <$> mummyPosition input <@ eAiTick input
+                    rightSideSegment pos =
+                        ( pos + H.Vector characterWidth (-20)
+                        , pos + H.Vector characterWidth 20
+                        )
+                    leftSideSegment pos =
+                        ( pos + H.Vector (-characterWidth) (-20)
+                        , pos + H.Vector (-characterWidth) 20
+                        )
+
+                    mummyCheckRight = rightSideSegment <$> mummyPosition input <@ eAiTick input
+                    mummyCheckLeft = leftSideSegment <$> mummyPosition input <@ eAiTick input
 
                 debugRendering <- current <$> toggle True eF1Pressed
                 characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
@@ -418,12 +431,18 @@ main = do
                     , DRight <$ eDPressed
                     , ePadChangeDir
                     ]
-                colForSeg <- performEvent $
-                    (\(s, e) -> liftIO $ H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
-                    <$> mummyCheck
-                mummyCanGoRight <- hold False $ (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForSeg
 
-                let aPressed = ($ SDL.ScancodeA) <$> pressedKeys input
+                colForRightSeg <- performEvent $
+                    (\(s, e) -> liftIO $ H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
+                    <$> mummyCheckRight
+                colForLeftSeg <- performEvent $
+                    (\(s, e) -> liftIO $ H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
+                    <$> mummyCheckLeft
+
+                let eMummyCanGoRight = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForRightSeg
+                    eMummyCanGoLeft = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForLeftSeg
+
+                    aPressed = ($ SDL.ScancodeA) <$> pressedKeys input
                     dPressed = ($ SDL.ScancodeD) <$> pressedKeys input
                     playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
                     playerMovement = CDouble <$> fromMaybe playerKeyMovement (mPadAxis input)
@@ -432,25 +451,38 @@ main = do
                     ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
 
                     jumpEvent = (-1000) <$ gate (playerOnGround input) ePlayerWantsToJump
-                    pickFirst True x _ = x
-                    pickFirst False _ x = x
 
-                    mummyGoRight True = H.Vector (- playerSpeed / 4) 0
-                    mummyGoRight False = H.zero
+                    mummySpeed AiRight = H.Vector (- playerSpeed / 4) 0
+                    mummySpeed AiLeft = H.Vector (playerSpeed / 4) 0
+                    mummySpeed AiStay = H.zero
 
-                    playerSurfaceVelocity = pickFirst
-                        <$> playerOnGround input <*> playerAcc <*> pure (H.Vector 0 0)
+                    playerSurfaceVelocity = bool
+                        <$> pure (H.Vector 0 0) <*> playerAcc <*> playerOnGround input
                     playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
 
                     jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
+
+                mummyDirection <- foldDynMaybe
+                    (\checks currentDir ->
+                         asum $ fmap
+                             (\(dir, canGo) ->
+                                  if dir == currentDir && not canGo then
+                                      Just AiStay
+                                  else if currentDir == AiStay && canGo then
+                                      Just dir
+                                  else
+                                      Nothing)
+                             checks)
+                    AiStay
+                    $ mergeList [(,) AiLeft <$> eMummyCanGoLeft, (,) AiRight <$> eMummyCanGoRight]
 
                 performEvent_ $ jump <$> jumpEvent
 
                 return LogicOutput
                     { playerSurfaceVel = playerSurfaceVelocity
-                    , mummySurfaceVel = mummyGoRight <$> mummyCanGoRight
-                    , playerForce = pickFirst
-                        <$> playerOnGround input <*> pure (H.Vector 0 0) <*> playerAirForce
+                    , mummySurfaceVel = mummySpeed <$> current mummyDirection
+                    , playerForce = bool
+                        <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround input
                     , debugRenderingEnabled = debugRendering
                     , debugRenderCharacters = characterDbg
                     , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
