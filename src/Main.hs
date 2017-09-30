@@ -151,6 +151,11 @@ data Direction = DLeft | DRight
 
 data AiDir = AiLeft | AiStay | AiRight deriving (Eq, Show)
 
+aiDirToDirection :: AiDir -> Maybe Direction
+aiDirToDirection AiStay = Nothing
+aiDirToDirection AiLeft = Just DLeft
+aiDirToDirection AiRight = Just DRight
+
 sortEvent :: SDL.Event -> DMap SdlEventTag Identity
 sortEvent event =
     wrapInDMap $ case SDL.eventPayload event of
@@ -184,6 +189,7 @@ data LogicOutput t = LogicOutput
     , debugRenderCharacters :: Behavior t Bool
     , playerAnimation :: Behavior t String
     , playerDirection :: Behavior t Direction
+    , mummyDirection :: Behavior t Direction
     , quit :: Event t ()
     }
 
@@ -407,8 +413,10 @@ main = do
                     eDPressed = pressEvent SDL.KeycodeD
                     padButtonPress = select (sdlEvent input) (JoyButtonEvent 0)
                     padAxisMove = select (sdlEvent input) (JoyAxisEvent 0)
-                    ePadAPressed = ffilter (\(SDL.JoyButtonEventData _ b s) -> b == 0 && s == 1) padButtonPress
-                    ePadNotCenter = ffilter (\(SDL.JoyAxisEventData _ a v) -> a == 0 && v /= 0) padAxisMove
+                    ePadAPressed = ffilter
+                        (\(SDL.JoyButtonEventData _ b s) -> b == 0 && s == 1) padButtonPress
+                    ePadNotCenter = ffilter
+                        (\(SDL.JoyAxisEventData _ a v) -> a == 0 && v /= 0) padAxisMove
                     ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
                         <$> ePadNotCenter
 
@@ -433,10 +441,12 @@ main = do
                     ]
 
                 colForRightSeg <- performEvent $
-                    (\(s, e) -> liftIO $ H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
+                    (\(s, e) -> liftIO $
+                        H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
                     <$> mummyCheckRight
                 colForLeftSeg <- performEvent $
-                    (\(s, e) -> liftIO $ H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
+                    (\(s, e) -> liftIO $
+                        H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
                     <$> mummyCheckLeft
 
                 let eMummyCanGoRight = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForRightSeg
@@ -462,7 +472,7 @@ main = do
 
                     jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
 
-                mummyDirection <- foldDynMaybe
+                mummyWalkDirection <- foldDynMaybe
                     (\checks currentDir ->
                          asum $ fmap
                              (\(dir, canGo) ->
@@ -476,17 +486,20 @@ main = do
                     AiStay
                     $ mergeList [(,) AiLeft <$> eMummyCanGoLeft, (,) AiRight <$> eMummyCanGoRight]
 
+                mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection $ updated mummyWalkDirection
+
                 performEvent_ $ jump <$> jumpEvent
 
                 return LogicOutput
                     { playerSurfaceVel = playerSurfaceVelocity
-                    , mummySurfaceVel = mummySpeed <$> current mummyDirection
+                    , mummySurfaceVel = mummySpeed <$> current mummyWalkDirection
                     , playerForce = bool
                         <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround input
                     , debugRenderingEnabled = debugRendering
                     , debugRenderCharacters = characterDbg
                     , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
                     , playerDirection = playerDir
+                    , mummyDirection = mummyDisplayDir
                     , quit = () <$ pressEvent SDL.KeycodeQ
                     }
 
@@ -581,9 +594,13 @@ main = do
                 isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput
                 characterDbg <- hSample $ debugRenderCharacters logicOutput
                 playerDir <- hSample $ playerDirection logicOutput
+                mummyDir <- hSample $ mummyDirection logicOutput
                 case playerDir of
                     DRight -> liftIO $ Spriter.setEntityInstanceScale playerEntityInstance $ V2 1 1
                     DLeft -> liftIO $ Spriter.setEntityInstanceScale playerEntityInstance $ V2 (-1) 1
+                case mummyDir of
+                    DRight -> liftIO $ Spriter.setEntityInstanceScale mummyEntityInstance $ V2 1 1
+                    DLeft -> liftIO $ Spriter.setEntityInstanceScale mummyEntityInstance $ V2 (-1) 1
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
 
                 render
