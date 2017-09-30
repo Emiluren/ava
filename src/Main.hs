@@ -188,6 +188,7 @@ data LogicOutput t = LogicOutput
     , debugRenderingEnabled :: Behavior t Bool
     , debugRenderCharacters :: Behavior t Bool
     , playerAnimation :: Behavior t String
+    , mummyAnimation :: Behavior t String
     , playerDirection :: Behavior t Direction
     , mummyDirection :: Behavior t Direction
     , quit :: Event t ()
@@ -488,16 +489,20 @@ main = do
 
                 mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection $ updated mummyWalkDirection
 
+                let mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection
+                    mummyMoving = (\(H.Vector vx _) -> abs vx > 0) <$> mummySurfaceVelocity
+
                 performEvent_ $ jump <$> jumpEvent
 
                 return LogicOutput
                     { playerSurfaceVel = playerSurfaceVelocity
-                    , mummySurfaceVel = mummySpeed <$> current mummyWalkDirection
+                    , mummySurfaceVel = mummySurfaceVelocity
                     , playerForce = bool
                         <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround input
                     , debugRenderingEnabled = debugRendering
                     , debugRenderCharacters = characterDbg
                     , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
+                    , mummyAnimation = (\moving -> if moving then "Run" else "Idle") <$> mummyMoving
                     , playerDirection = playerDir
                     , mummyDirection = mummyDisplayDir
                     , quit = () <$ pressEvent SDL.KeycodeQ
@@ -581,6 +586,10 @@ main = do
 
                 currentMummySurfaceVel <- hSample $ mummySurfaceVel logicOutput
                 H.surfaceVel mummyFeetShape $= currentMummySurfaceVel
+
+                currentMummyAnimation <- hSample $ mummyAnimation logicOutput
+                liftIO $ withCString currentMummyAnimation $
+                    Spriter.entityInstanceSetCurrentAnimation mummyEntityInstance
 
                 let spriterTimeStep = CDouble $ dt * 1000
                 liftIO $ do
