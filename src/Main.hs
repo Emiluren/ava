@@ -408,6 +408,7 @@ main = do
             mainReflex input = do
                 let pressEvent kc = ffilter isPress $ select (sdlEvent input) (KeyEvent kc)
                     eWPressed = pressEvent SDL.KeycodeW
+                    eKPressed = pressEvent SDL.KeycodeK
                     eF1Pressed = pressEvent SDL.KeycodeF1
                     eF2Pressed = pressEvent SDL.KeycodeF2
                     eAPressed = pressEvent SDL.KeycodeA
@@ -460,6 +461,7 @@ main = do
                     playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
                     playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
                     ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
+                    ePlayerWantsToKick = mconcat [() <$ eKPressed]
 
                     jumpEvent = (-1000) <$ gate (playerOnGround input) ePlayerWantsToJump
 
@@ -491,6 +493,14 @@ main = do
 
                 let mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection
                     mummyMoving = (\(H.Vector vx _) -> abs vx > 0) <$> mummySurfaceVelocity
+                    kickDuration = 0.6
+                    pickAnimation moving lastKickTime currentTime =
+                        let runOrIdle = if moving then "Run" else "Idle"
+                        in case lastKickTime of
+                            Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
+                            Nothing -> runOrIdle
+
+                latestPlayerKick <- hold Nothing $ Just <$> time input <@ ePlayerWantsToKick
 
                 performEvent_ $ jump <$> jumpEvent
 
@@ -501,7 +511,8 @@ main = do
                         <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround input
                     , debugRenderingEnabled = debugRendering
                     , debugRenderCharacters = characterDbg
-                    , playerAnimation = (\moving -> if moving then "Run" else "Idle") <$> playerMoving
+                    , playerAnimation =
+                            pickAnimation <$> playerMoving <*> latestPlayerKick <*> time input
                     , mummyAnimation = (\moving -> if moving then "Run" else "Idle") <$> mummyMoving
                     , playerDirection = playerDir
                     , mummyDirection = mummyDisplayDir
