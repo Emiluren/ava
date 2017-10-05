@@ -361,7 +361,6 @@ main = do
 
     runSpiderHost $ do
         (eSdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
-        (aiTick, aiTickTriggerRef) <- newEventWithTriggerRef
         (eStart, startTriggerRef) <- newEventWithTriggerRef
 
         startTime <- liftIO Time.getCurrentTime
@@ -421,7 +420,8 @@ main = do
                         , pos + H.Vector (-characterWidth) 20
                         )
 
-                    mummyCheckRight = rightSideSegment <$> mummyPos <@ aiTick
+                aiTick <- tickLossy (1/15) startTime
+                let mummyCheckRight = rightSideSegment <$> mummyPos <@ aiTick
                     mummyCheckLeft = leftSideSegment <$> mummyPos <@ aiTick
 
                 debugRendering <- current <$> toggle True eF1Pressed
@@ -498,9 +498,6 @@ main = do
 
                 performEvent_ $ jump <$> jumpEvent
 
-                lastUtcEvent <- updated <$> clock
-                --performEvent_ $ (liftIO . print) <$> ((,,) <$> latestPlayerKick <*> timeSinceStart <@> lastUtcEvent)
-
                 return LogicOutput
                     { playerSurfaceVel = playerSurfaceVelocity
                     , mummySurfaceVel = mummySurfaceVelocity
@@ -538,12 +535,6 @@ main = do
                     when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
                 eventChanTriggerThread
 
-        let fireAiTick = runSpiderHost $ do
-                mAiTrigger <- liftIO $ readIORef aiTickTriggerRef
-                case mAiTrigger of
-                    Nothing -> return []
-                    Just eTrigger -> fire [eTrigger :=> Identity ()] $ return Nothing
-
         playerArbiterCallback <- liftIO $ H.makeArbiterIterator
             (\_ arb -> do
                     (s1, s2) <- H.arbiterGetShapes arb
@@ -562,8 +553,6 @@ main = do
                     stepsToRun = timeAcc' `div'` timeStep
 
                 liftIO $ replicateM_ stepsToRun $ H.step space $ realToFrac timeStep
-
-                fireEventRef aiTickTriggerRef ()
 
                 onGround <- liftIO $ do
                     writeIORef playerOnGroundRef False
@@ -643,15 +632,11 @@ main = do
             Nothing -> return []
             Just eTrigger -> fire [eTrigger :=> Identity ()] $ return Nothing
 
-        let ticker = threadDelay (1000000 `div` 15) >> fireAiTick >> ticker
-
         eventTriggerId <- liftIO $ forkIO eventChanTriggerThread
-        tickerId <- liftIO $ forkIO ticker
 
         appLoop startTime 0.0
 
         liftIO $ do
-            killThread tickerId
             killThread eventTriggerId
             freeHaskellFunPtr playerArbiterCallback
 
