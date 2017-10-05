@@ -74,6 +74,9 @@ cabal.project.local
 src/SpriterBindings.cpp
 src/ChipmunkBindings.c
 
+# Spriter autosaves
+*.autosave.scml
+
 ### Linux ###
 
 # temporary files which can be created if a process still has a handle open of a deleted file
