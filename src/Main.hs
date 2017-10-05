@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables, FlexibleContexts, GADTs, TemplateHaskell #-}
 module Main where
 
+import Control.Arrow ((***))
 import Control.Concurrent (forkIO, killThread)
 import qualified Control.Concurrent.Chan as Chan
 import Control.Lens ((^.))
@@ -155,7 +156,7 @@ newtype RenderState = RenderState
     { cameraPosition :: V2 Double
     }
 
-data Direction = DLeft | DRight
+data Direction = DLeft | DRight deriving (Eq, Show)
 
 data AiDir = AiLeft | AiStay | AiRight deriving (Eq, Show)
 
@@ -314,19 +315,25 @@ main = do
             ]
         characterWidth = 10
         characterHeight = 30
-        characterFeetShapeType = H.Circle (characterWidth * 0.3) (H.Vector 0 $ -characterWidth * 0.2)
+        characterFeetShapeType = H.Circle (characterWidth * 0.3) (H.Vector 0 $ - characterWidth * 0.2)
         characterBodyShapeType = H.Polygon (V.fromList $ reverse $ makeCharacterBody characterWidth characterHeight) 0
         characterMass = 5
         characterFeetFriction = 2
+        characterSide = characterWidth * 0.7
 
-        mummySideCheckUR = H.Vector characterWidth (-10)
-        mummySideCheckLR = H.Vector characterWidth 10
-        mummySideCheckUL = H.Vector (-characterWidth) (-10)
-        mummySideCheckLL = H.Vector (-characterWidth) 10
+        mummySideCheckUR = H.Vector characterSide (-10)
+        mummySideCheckLR = H.Vector characterSide 10
+        mummySideCheckUL = H.Vector (-characterSide) (-10)
+        mummySideCheckLL = H.Vector (-characterSide) 10
 
-        playerKickCheck = ( H.Vector (0.6 * characterWidth) (-17)
-                          , H.Vector (2 * characterWidth) (-17)
-                          )
+        playerKickCheckR =
+            ( H.Vector characterSide (-17)
+            , H.Vector (2 * characterSide) (-17)
+            )
+        playerKickCheckL =
+            ( H.Vector (- characterSide) (-17)
+            , H.Vector (- 2 * characterSide) (-17)
+            )
 
     mummyBody <- H.newBody characterMass $ 1/0
     H.spaceAddBody space mummyBody
@@ -335,7 +342,7 @@ main = do
     H.spaceAddShape space mummyFeetShape
     H.spaceAddShape space mummyBodyShape
     H.friction mummyFeetShape $= characterFeetFriction
-    H.friction mummyBodyShape $= 0
+    H.friction mummyBodyShape $= 0.5
     H.position mummyBody $= H.Vector 110 200
     --H.collisionType mummyFeetShape $= playerFeetCollisionType
 
@@ -346,7 +353,7 @@ main = do
     H.spaceAddShape space playerFeetShape
     H.spaceAddShape space playerBodyShape
     H.friction playerFeetShape $= characterFeetFriction
-    H.friction playerBodyShape $= 0
+    H.friction playerBodyShape $= 0.5
     H.position playerBody $= H.Vector 240 100
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
@@ -369,8 +376,7 @@ main = do
                 renderShape textureRenderer camPos shelf shelfShapeType
                 renderShape textureRenderer camPos circleShape circleShapeType
 
-                forM_ wallShapes $ \(shape, shapeType) ->
-                    renderShape textureRenderer camPos shape shapeType
+                forM_ wallShapes $ uncurry (renderShape textureRenderer camPos)
 
                 when characterDbg $ do
                     SDL.rendererDrawColor textureRenderer $= V4 100 255 100 255
@@ -393,7 +399,8 @@ main = do
                     drawCharacterLine mummyPos (mummySideCheckUL, mummySideCheckLL)
                     drawCharacterLine mummyPos (mummySideCheckUR, mummySideCheckLR)
 
-                    drawCharacterLine playerPos playerKickCheck
+                    drawCharacterLine playerPos playerKickCheckR
+                    drawCharacterLine playerPos playerKickCheckL
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
@@ -413,6 +420,7 @@ main = do
         (playerOnGround, setPlayerOnGround) <- mutableBehavior False
         (pressedKeys, setPressedKeys) <- mutableBehavior =<< SDL.getKeyboardState
         (mummyPos, setMummyPos) <- mutableBehavior H.zero
+        (playerPos, setPlayerPos) <- mutableBehavior H.zero
 
         playerOnGroundRef <- liftIO $ newIORef False
 
@@ -423,7 +431,7 @@ main = do
 
         (mAxis, mSetAxis) <- case mGamepad of
             Nothing -> return (Nothing, Nothing)
-            Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior (0 :: Double)
+            Just _ -> (Just *** Just) <$> mutableBehavior (0 :: Double)
 
         let groundCheckFilter = H.ShapeFilter
                 { H.shapeFilterGroup = H.noGroup
@@ -474,6 +482,7 @@ main = do
                 aiTick <- tickLossy (1/15) startTime
                 let mummyCheckRight = rightSideSegment <$> mummyPos <@ aiTick
                     mummyCheckLeft = leftSideSegment <$> mummyPos <@ aiTick
+                    queryLineSeg (s, e) = liftIO $ H.spaceSegmentQueryFirst space s e 1 groundCheckFilter
 
                 debugRendering <- current <$> toggle True eF1Pressed
                 characterDbg <- current <$> toggle True (gate debugRendering eF2Pressed)
@@ -484,14 +493,8 @@ main = do
                     , ePadChangeDir
                     ]
 
-                colForRightSeg <- performEvent $
-                    (\(s, e) -> liftIO $
-                        H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
-                    <$> mummyCheckRight
-                colForLeftSeg <- performEvent $
-                    (\(s, e) -> liftIO $
-                        H.spaceSegmentQueryFirst space s e characterWidth groundCheckFilter)
-                    <$> mummyCheckLeft
+                colForRightSeg <- performEvent $ queryLineSeg <$> mummyCheckRight
+                colForLeftSeg <- performEvent $ queryLineSeg <$> mummyCheckLeft
 
                 let eMummyCanGoRight = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForRightSeg
                     eMummyCanGoLeft = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForLeftSeg
@@ -517,7 +520,7 @@ main = do
                         <$> pure (H.Vector 0 0) <*> playerAcc <*> playerOnGround
                     playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
 
-                    jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
+                    jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) H.zero
 
                 mummyWalkDirection <- foldDynMaybe
                     (\checks currentDir ->
@@ -545,8 +548,21 @@ main = do
                             Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
                             Nothing -> runOrIdle
                     clock = clockLossy (1/60) startTime
-                    playerKickEffect = do
-                        putStrLn "Kick"
+                    playerKickEffect playerP playerD = do
+                        let (pkc1, pkc2) = case playerD of
+                                DRight -> playerKickCheckR
+                                DLeft -> playerKickCheckL
+                            playerKickVec = case playerD of
+                                DRight -> H.Vector 1000 0
+                                DLeft -> H.Vector (-1000) 0
+
+                        hitShapeInfo <- queryLineSeg (playerP + pkc1, playerP + pkc2)
+
+                        let hitShape = H.segQueryInfoShape hitShapeInfo
+                        when (hitShape /= nullPtr) $ do
+                            hitBody <- get $ H.shapeBody hitShape
+                            liftIO $ H.applyImpulse hitBody playerKickVec H.zero
+                            when (hitBody == mummyBody) $ liftIO $ putStrLn "Kicked mummy"
 
                 tickInfo <- current <$> clock
                 let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
@@ -555,7 +571,7 @@ main = do
                 eDelayedPlayerKick <- delay kickDelay ePlayerKick
 
                 performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime playerEntityInstance 0) <$ ePlayerKick
-                performEvent_ $ liftIO playerKickEffect <$ eDelayedPlayerKick
+                performEvent_ $ playerKickEffect <$> playerPos <*> playerDir <@ eDelayedPlayerKick
 
                 performEvent_ $ jump <$> jumpEvent
 
@@ -662,8 +678,9 @@ main = do
                     Spriter.setEntityInstanceTimeElapsed playerEntityInstance spriterTimeStep
                     Spriter.setEntityInstanceTimeElapsed mummyEntityInstance spriterTimeStep
 
-                (H.Vector (CDouble playerX) (CDouble playerY)) <- get $ H.position playerBody
+                currentPlayerPos@(H.Vector (CDouble playerX) (CDouble playerY)) <- get $ H.position playerBody
                 currentMummyPos@(H.Vector (CDouble mummyX) (CDouble mummyY)) <- get $ H.position mummyBody
+                setPlayerPos currentPlayerPos
                 setMummyPos currentMummyPos
 
                 isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput

@@ -138,10 +138,10 @@ type SeparateHandlerFun = Ptr Arbiter -> Ptr Space -> Ptr () -> IO ()
 type BodyArbiterIteratorFun = Ptr Body -> Ptr Arbiter -> Ptr () -> IO ()
 
 skipTwo :: (a -> b) -> (a -> c -> d -> b)
-skipTwo f = (\x _ _ -> f x)
+skipTwo f x _ _ = f x
 
 skipOne :: (a -> b -> c) -> (a -> b -> d -> c)
-skipOne f = (\x y _ -> f x y)
+skipOne f x y _ = f x y
 
 makeBeginHandler :: BeginHandler -> IO (FunPtr BeginHandlerFun)
 makeBeginHandler = $(C.mkFunPtr [t| BeginHandlerFun |]) . skipTwo
