@@ -75,6 +75,9 @@ padButtonX, padButtonA :: Word8
 padButtonA = 0
 padButtonX = 2
 
+padXAxis :: Word8
+padXAxis = 0
+
 makeHVector :: (CDouble, CDouble) -> H.Vector
 makeHVector = uncurry H.Vector
 
@@ -250,12 +253,12 @@ main = do
     playerSpriterModel <- withCString "res/princess/Princess.scon"
         (Spriter.loadSpriterModel imgloader renderf)
     playerEntityInstance <- withCString "Princess" $ Spriter.modelGetNewEntityInstance playerSpriterModel
-    withCString "Idle" $ Spriter.entityInstanceSetCurrentAnimation playerEntityInstance
+    withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation playerEntityInstance
 
     mummySpriterModel <- withCString "res/mummy/Mummy.scon"
         (Spriter.loadSpriterModel imgloader renderf)
     mummyEntityInstance <- withCString "Mummy" $ Spriter.modelGetNewEntityInstance mummySpriterModel
-    withCString "Idle" $ Spriter.entityInstanceSetCurrentAnimation mummyEntityInstance
+    withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation mummyEntityInstance
 
     putStrLn "Creating chipmunk space"
     space <- H.newSpace
@@ -421,7 +424,10 @@ main = do
                     ePadAPressed = padFilterButtonPress padButtonA
                     ePadXPressed = padFilterButtonPress padButtonX
                     ePadNotCenter = ffilter
-                        (\(SDL.JoyAxisEventData _ a v) -> a == 0 && v /= 0) padAxisMove
+                        (\(SDL.JoyAxisEventData _ a v) ->
+                             a == padXAxis &&
+                             abs (fromIntegral v / 32768 :: Float) > 0.15)
+                        padAxisMove
                     ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
                         <$> ePadNotCenter
 
@@ -511,6 +517,7 @@ main = do
 
                 latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerWantsToKick
 
+                performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime playerEntityInstance 0) <$ ePlayerWantsToKick
                 performEvent_ $ jump <$> jumpEvent
 
                 return LogicOutput
@@ -601,19 +608,19 @@ main = do
 
                 currentPlayerAnimation <- hSample $ playerAnimation logicOutput
                 liftIO $ withCString currentPlayerAnimation $
-                    Spriter.entityInstanceSetCurrentAnimation playerEntityInstance
+                    Spriter.setEntityInstanceCurrentAnimation playerEntityInstance
 
                 currentMummySurfaceVel <- hSample $ mummySurfaceVel logicOutput
                 H.surfaceVel mummyFeetShape $= currentMummySurfaceVel
 
                 currentMummyAnimation <- hSample $ mummyAnimation logicOutput
                 liftIO $ withCString currentMummyAnimation $
-                    Spriter.entityInstanceSetCurrentAnimation mummyEntityInstance
+                    Spriter.setEntityInstanceCurrentAnimation mummyEntityInstance
 
                 let spriterTimeStep = realToFrac $ dt * 1000
                 liftIO $ do
-                    Spriter.entityInstanceSetTimeElapsed playerEntityInstance spriterTimeStep
-                    Spriter.entityInstanceSetTimeElapsed mummyEntityInstance spriterTimeStep
+                    Spriter.setEntityInstanceTimeElapsed playerEntityInstance spriterTimeStep
+                    Spriter.setEntityInstanceTimeElapsed mummyEntityInstance spriterTimeStep
 
                 (H.Vector (CDouble playerX) (CDouble playerY)) <- get $ H.position playerBody
                 currentMummyPos@(H.Vector (CDouble mummyX) (CDouble mummyY)) <- get $ H.position mummyBody

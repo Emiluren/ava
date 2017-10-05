@@ -46,11 +46,6 @@ modelGetNewEntityInstance model entityName =
     [C.exp| EntityInstance*
         { $(SpriterModel* model)->getNewEntityInstance($(char* entityName)) }|]
 
-entityInstanceSetCurrentAnimation :: Ptr CEntityInstance -> CString -> IO ()
-entityInstanceSetCurrentAnimation ptr animName =
-    [C.exp| void
-        { $(EntityInstance* ptr)->setCurrentAnimation($(char* animName)) } |]
-
 makeImageLoader :: ImageLoader -> IO (FunPtr ImageLoader)
 makeImageLoader = $(C.mkFunPtr [t| ImageLoader |])
 
@@ -63,10 +58,21 @@ setErrorFunction = [C.exp| void { Settings::setErrorFunction(Settings::simpleErr
 renderEntityInstance :: Ptr CEntityInstance -> IO ()
 renderEntityInstance entityInstance = [C.exp| void { $(EntityInstance* entityInstance)->render() } |]
 
-entityInstanceSetTimeElapsed :: Ptr CEntityInstance -> CDouble -> IO ()
-entityInstanceSetTimeElapsed entityInstance dt =
+setEntityInstanceCurrentAnimation :: Ptr CEntityInstance -> CString -> IO ()
+setEntityInstanceCurrentAnimation ptr animName =
+    [C.exp| void
+        { $(EntityInstance* ptr)->setCurrentAnimation($(char* animName)) } |]
+
+setEntityInstanceTimeElapsed :: Ptr CEntityInstance -> CDouble -> IO ()
+setEntityInstanceTimeElapsed entityInstance dt =
     [C.exp| void {
         $(EntityInstance* entityInstance)->setTimeElapsed($(double dt))
+    } |]
+
+setEntityInstanceCurrentTime :: Ptr CEntityInstance -> CDouble -> IO ()
+setEntityInstanceCurrentTime entityInstance t =
+    [C.exp| void {
+        $(EntityInstance* entityInstance)->setCurrentTime($(double t))
     } |]
 
 setEntityInstancePosition :: Ptr CEntityInstance -> V2 CDouble -> IO ()
