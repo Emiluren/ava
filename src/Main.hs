@@ -400,6 +400,8 @@ main = do
 
                     drawCharacterLine playerPos playerKickCheckR
                     drawCharacterLine playerPos playerKickCheckL
+                    drawCharacterLine mummyPos playerKickCheckR
+                    drawCharacterLine mummyPos playerKickCheckL
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
@@ -483,8 +485,8 @@ main = do
                     queryLineSeg (s, e) = liftIO $ H.spaceSegmentQueryFirst space s e 1 groundCheckFilter
 
                 debugRendering <- current <$> toggle True eF1Pressed
-                characterDbg <- current <$> toggle True (gate debugRendering eF2Pressed)
-                colCheckDbg <- current <$> toggle True (gate debugRendering eF3Pressed)
+                characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
+                colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
                 playerDir <- hold DRight $ leftmost
                     [ DLeft <$ eAPressed
                     , DRight <$ eDPressed
@@ -520,40 +522,31 @@ main = do
                             segsToCheck =
                                 [ rightSideSegment mp
                                 , leftSideSegment mp
-                                , (pkc1l + mp, pkc2l + mp)
                                 , (pkc1r + mp, pkc2r + mp)
+                                , (pkc1l + mp, pkc2l + mp)
                                 ]
 
-                        [cgl, cgr, cwl, cwr] <- forM segsToCheck $ \seg -> do
+                        [cgr, cgl, cwr, cwl] <- forM segsToCheck $ \seg -> do
                             segHitInfo <- queryLineSeg seg
                             return $ H.segQueryInfoShape segHitInfo /= nullPtr
-                        return (cgl, cgr, cwl, cwr)
+                        return (cgr, cgl, cwr, cwl)
 
-                    runAiLogic (colGroundLeft, colGroundRight, colWallLeft, colWallRight) currentDir =
+                    runAiLogic (colGroundRight, colGroundLeft, colWallRight, colWallLeft) currentDir =
                         let canGoLeft = colGroundLeft && not colWallLeft
                             canGoRight = colGroundRight && not colWallRight
                         in case currentDir of
-                            AiLeft ->
-                                if canGoLeft then
-                                    Nothing
-                                else if canGoRight then
-                                    Just AiRight
-                                else
-                                    Just AiStay
-                            AiRight ->
-                                if canGoRight then
-                                    Nothing
-                                else if canGoLeft then
-                                    Just AiLeft
-                                else
-                                    Just AiStay
-                            AiStay ->
-                                if canGoRight then
-                                    Just AiRight
-                                else if canGoLeft then
-                                    Just AiLeft
-                                else
-                                    Nothing
+                            AiLeft
+                                | canGoLeft -> Nothing
+                                | canGoRight -> Just AiRight
+                                | otherwise -> Just AiStay
+                            AiRight
+                                | canGoRight -> Nothing
+                                | canGoLeft -> Just AiLeft
+                                | otherwise -> Just AiStay
+                            AiStay
+                                | canGoRight -> Just AiRight
+                                | canGoLeft -> Just AiLeft
+                                | otherwise -> Nothing
 
                 colResults <- performEvent $ doAiCollisionChecks <$> mummyPos <@ aiTick
 
