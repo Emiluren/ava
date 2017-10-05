@@ -22,6 +22,7 @@ import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Storable as V
+import Data.Word (Word8)
 
 import Foreign.C.String (CString, withCString, peekCString)
 import Foreign.C.Types (CInt, CUInt, CFloat(..), CDouble(..))
@@ -69,6 +70,10 @@ timeStep = 1/120
 shelfStart, shelfEnd :: Num a => (a, a)
 shelfStart = (100, 200)
 shelfEnd = (300, 320)
+
+padButtonX, padButtonA :: Word8
+padButtonA = 0
+padButtonX = 2
 
 makeHVector :: (CDouble, CDouble) -> H.Vector
 makeHVector = uncurry H.Vector
@@ -411,8 +416,10 @@ main = do
                     eDPressed = pressEvent SDL.KeycodeD
                     padButtonPress = select sdlEventFan (JoyButtonEvent 0)
                     padAxisMove = select sdlEventFan (JoyAxisEvent 0)
-                    ePadAPressed = ffilter
-                        (\(SDL.JoyButtonEventData _ b s) -> b == 0 && s == 1) padButtonPress
+                    padFilterButtonPress b = ffilter
+                        (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) padButtonPress
+                    ePadAPressed = padFilterButtonPress padButtonA
+                    ePadXPressed = padFilterButtonPress padButtonX
                     ePadNotCenter = ffilter
                         (\(SDL.JoyAxisEventData _ a v) -> a == 0 && v /= 0) padAxisMove
                     ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
@@ -426,8 +433,6 @@ main = do
                         ( pos + H.Vector (-characterWidth) (-20)
                         , pos + H.Vector (-characterWidth) 20
                         )
-
-                performEvent_ $ liftIO . print <$> padButtonPress
 
                 aiTick <- tickLossy (1/15) startTime
                 let mummyCheckRight = rightSideSegment <$> mummyPos <@ aiTick
@@ -461,7 +466,7 @@ main = do
                     playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
                     playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
                     ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
-                    ePlayerWantsToKick = mconcat [() <$ eKPressed]
+                    ePlayerWantsToKick = mconcat [() <$ eKPressed, () <$ ePadXPressed]
 
                     jumpEvent = (-1000) <$ gate playerOnGround ePlayerWantsToJump
 
