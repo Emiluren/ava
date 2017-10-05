@@ -20,6 +20,7 @@ executable ava
                      , SpriterTypes
                      , ChipmunkBindings
                      , ChipmunkTypes
+                     , Reflex.Time
   default-language:    Haskell2010
   extra-libraries:     spriterengine chipmunk pthread stdc++
   c-sources:           src/SpriterBindings.cpp
@@ -38,6 +39,7 @@ executable ava
                      , linear
                      , mtl
                      , primitive
+                     , random
                      , reflex
                      , ref-tf
                      , sdl2 >= 2.1
@@ -45,5 +47,8 @@ executable ava
                      , sdl2-image
                      , StateVar
                      , template-haskell
+                     , these
+                     , time
                      , transformers
+                     , unbounded-delays
                      , vector

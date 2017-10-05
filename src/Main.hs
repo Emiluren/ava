@@ -2,12 +2,12 @@
 module Main where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
+import qualified Control.Concurrent.Chan as Chan
 import Control.Lens ((^.))
 import Control.Monad (unless, replicateM_)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Ref (Ref, MonadRef)
-import Control.Monad.Primitive (PrimMonad)
 
 import Data.Bool (bool)
 import Data.Dependent.Map (DMap)
@@ -19,6 +19,7 @@ import Data.GADT.Compare.TH
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Maybe (isJust, fromMaybe)
 import Data.StateVar (($=), get)
+import qualified Data.Time.Clock as Time
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Storable as V
 
@@ -50,9 +51,8 @@ import Reflex.Host.Class
     , subscribeEvent
     , readEvent
     , MonadReflexHost
-    , ReflexHost
-    , HostFrame
     )
+import Reflex.Time
 
 import SDL (Point(P))
 import qualified SDL
@@ -63,7 +63,7 @@ import qualified SDL.Primitive as SDL
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
 
-timeStep :: Double
+timeStep :: Time.NominalDiffTime
 timeStep = 1/120
 
 shelfStart, shelfEnd :: Num a => (a, a)
@@ -171,16 +171,6 @@ sortEvent event =
             OtherEvent ==> event
     where wrapInDMap x = DMap.fromList [x]
 
-data LogicInput t = LogicInput
-    { sdlEvent :: EventSelector t SdlEventTag
-    , time :: Behavior t Double
-    , playerOnGround :: Behavior t Bool
-    , pressedKeys :: Behavior t (SDL.Scancode -> Bool)
-    , mPadAxis :: Maybe (Behavior t Double)
-    , mummyPosition :: Behavior t H.Vector
-    , eAiTick :: Event t ()
-    }
-
 data LogicOutput t = LogicOutput
     { playerSurfaceVel :: Behavior t H.Vector
     , mummySurfaceVel :: Behavior t H.Vector
@@ -203,12 +193,6 @@ mutableBehavior startValue = do
     (eUpdateValue, eUpdateValueTriggerRef) <- newEventWithTriggerRef
     value <- runHostFrame $ hold startValue eUpdateValue
     return (value, fireEventRef eUpdateValueTriggerRef)
-
-delayEvent :: (TriggerEvent t m, PerformEvent t m, MonadIO (Performable m)) =>
-    Event t a -> Int -> m (Event t a)
-delayEvent evt delay =
-    let runAfterDelay x callback = liftIO $ forkIO (threadDelay delay >> callback x) >> return ()
-    in performEventAsync (runAfterDelay <$> evt)
 
 main :: IO ()
 main = do
@@ -378,12 +362,12 @@ main = do
     runSpiderHost $ do
         (eSdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
         (aiTick, aiTickTriggerRef) <- newEventWithTriggerRef
-        --(colForRightSeg, colForSegTriggerRef) <- newEventWithTriggerRef
+        (eStart, startTriggerRef) <- newEventWithTriggerRef
 
-        startTime <- SDL.time
-        (gameTime, setTime) <- mutableBehavior startTime
-        (playerTouchingGround, setPlayerOnGround) <- mutableBehavior False
-        (keysPressed, setPressedKeys) <- mutableBehavior =<< SDL.getKeyboardState
+        startTime <- liftIO Time.getCurrentTime
+
+        (playerOnGround, setPlayerOnGround) <- mutableBehavior False
+        (pressedKeys, setPressedKeys) <- mutableBehavior =<< SDL.getKeyboardState
         (mummyPos, setMummyPos) <- mutableBehavior H.zero
 
         playerOnGroundRef <- liftIO $ newIORef False
@@ -395,7 +379,7 @@ main = do
 
         (mAxis, mSetAxis) <- case mGamepad of
             Nothing -> return (Nothing, Nothing)
-            Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior 0
+            Just _ -> (\(v, s) -> (Just v, Just s)) <$> mutableBehavior (0 :: Double)
 
         let groundCheckFilter = H.ShapeFilter
                 { H.shapeFilterGroup = H.noGroup
@@ -403,18 +387,24 @@ main = do
                 , H.shapeFilterMask = H.allCategories
                 }
 
-            mainReflex :: (Ref m ~ Ref IO, ReflexHost t, MonadIO (HostFrame t), PrimMonad (HostFrame t), MonadHold t m) =>
-                LogicInput t -> PerformEventT t m (LogicOutput t)
-            mainReflex input = do
-                let pressEvent kc = ffilter isPress $ select (sdlEvent input) (KeyEvent kc)
+            sdlEventFan = fan eSdlEvent
+
+            mainReflex :: PostBuildT
+                (SpiderTimeline Global)
+                (TriggerEventT
+                    (SpiderTimeline Global)
+                    (PerformEventT (SpiderTimeline Global) (SpiderHost Global)))
+                (LogicOutput (SpiderTimeline Global))
+            mainReflex = do
+                let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
                     eWPressed = pressEvent SDL.KeycodeW
                     eKPressed = pressEvent SDL.KeycodeK
                     eF1Pressed = pressEvent SDL.KeycodeF1
                     eF2Pressed = pressEvent SDL.KeycodeF2
                     eAPressed = pressEvent SDL.KeycodeA
                     eDPressed = pressEvent SDL.KeycodeD
-                    padButtonPress = select (sdlEvent input) (JoyButtonEvent 0)
-                    padAxisMove = select (sdlEvent input) (JoyAxisEvent 0)
+                    padButtonPress = select sdlEventFan (JoyButtonEvent 0)
+                    padAxisMove = select sdlEventFan (JoyAxisEvent 0)
                     ePadAPressed = ffilter
                         (\(SDL.JoyButtonEventData _ b s) -> b == 0 && s == 1) padButtonPress
                     ePadNotCenter = ffilter
@@ -431,8 +421,8 @@ main = do
                         , pos + H.Vector (-characterWidth) 20
                         )
 
-                    mummyCheckRight = rightSideSegment <$> mummyPosition input <@ eAiTick input
-                    mummyCheckLeft = leftSideSegment <$> mummyPosition input <@ eAiTick input
+                    mummyCheckRight = rightSideSegment <$> mummyPos <@ aiTick
+                    mummyCheckLeft = leftSideSegment <$> mummyPos <@ aiTick
 
                 debugRendering <- current <$> toggle True eF1Pressed
                 characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
@@ -454,23 +444,23 @@ main = do
                 let eMummyCanGoRight = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForRightSeg
                     eMummyCanGoLeft = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForLeftSeg
 
-                    aPressed = ($ SDL.ScancodeA) <$> pressedKeys input
-                    dPressed = ($ SDL.ScancodeD) <$> pressedKeys input
+                    aPressed = ($ SDL.ScancodeA) <$> pressedKeys
+                    dPressed = ($ SDL.ScancodeD) <$> pressedKeys
                     playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
-                    playerMovement = CDouble <$> fromMaybe playerKeyMovement (mPadAxis input)
+                    playerMovement = CDouble <$> fromMaybe playerKeyMovement mAxis
                     playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
                     playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
                     ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
                     ePlayerWantsToKick = mconcat [() <$ eKPressed]
 
-                    jumpEvent = (-1000) <$ gate (playerOnGround input) ePlayerWantsToJump
+                    jumpEvent = (-1000) <$ gate playerOnGround ePlayerWantsToJump
 
                     mummySpeed AiRight = H.Vector (- playerSpeed / 4) 0
                     mummySpeed AiLeft = H.Vector (playerSpeed / 4) 0
                     mummySpeed AiStay = H.zero
 
                     playerSurfaceVelocity = bool
-                        <$> pure (H.Vector 0 0) <*> playerAcc <*> playerOnGround input
+                        <$> pure (H.Vector 0 0) <*> playerAcc <*> playerOnGround
                     playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
 
                     jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) (H.Vector 0 0)
@@ -493,51 +483,68 @@ main = do
 
                 let mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection
                     mummyMoving = (\(H.Vector vx _) -> abs vx > 0) <$> mummySurfaceVelocity
-                    kickDuration = 0.6
+                    kickDuration = 0.6 :: Time.NominalDiffTime
                     pickAnimation moving lastKickTime currentTime =
                         let runOrIdle = if moving then "Run" else "Idle"
                         in case lastKickTime of
                             Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
                             Nothing -> runOrIdle
+                    clock = clockLossy (1/60) startTime
 
-                latestPlayerKick <- hold Nothing $ Just <$> time input <@ ePlayerWantsToKick
+                tickInfo <- current <$> clock
+                let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
+
+                latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerWantsToKick
 
                 performEvent_ $ jump <$> jumpEvent
+
+                lastUtcEvent <- updated <$> clock
+                --performEvent_ $ (liftIO . print) <$> ((,,) <$> latestPlayerKick <*> timeSinceStart <@> lastUtcEvent)
 
                 return LogicOutput
                     { playerSurfaceVel = playerSurfaceVelocity
                     , mummySurfaceVel = mummySurfaceVelocity
                     , playerForce = bool
-                        <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround input
+                        <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround
                     , debugRenderingEnabled = debugRendering
                     , debugRenderCharacters = characterDbg
                     , playerAnimation =
-                            pickAnimation <$> playerMoving <*> latestPlayerKick <*> time input
+                            pickAnimation <$> playerMoving <*> latestPlayerKick <*> timeSinceStart
                     , mummyAnimation = (\moving -> if moving then "Run" else "Idle") <$> mummyMoving
                     , playerDirection = playerDir
                     , mummyDirection = mummyDisplayDir
                     , quit = () <$ pressEvent SDL.KeycodeQ
                     }
 
-        (logicOutput, FireCommand fire) <- hostPerformEventT $ mainReflex $ LogicInput
-            { sdlEvent = (fan eSdlEvent)
-            , time = gameTime
-            , playerOnGround = playerTouchingGround
-            , pressedKeys = keysPressed
-            , mPadAxis = mAxis
-            , mummyPosition = mummyPos
-            , eAiTick = aiTick
-            }
+        eventChan <- liftIO Chan.newChan
+        (logicOutput, FireCommand fire) <- hostPerformEventT $
+            runTriggerEventT (runPostBuildT mainReflex eStart) eventChan
+
+        hQuit <- subscribeEvent $ quit logicOutput
+        quitRef <- liftIO $ newIORef False
+
+        let eventChanTriggerThread = do
+                eventTriggers <- Chan.readChan eventChan
+                --putStrLn "yolo"
+                runSpiderHost $ forM_ eventTriggers $ \(EventTriggerRef triggerRef :=> TriggerInvocation value onComplete) -> do
+                    --liftIO $ putStrLn "swag"
+                    mTrigger <- liftIO $ readIORef triggerRef
+                    lmQuit <- case mTrigger of
+                        Nothing -> return []
+                        Just trigger ->
+                            fire [trigger :=> Identity value] $
+                                readEvent hQuit >>= sequence
+                    liftIO onComplete
+                    when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
+                eventChanTriggerThread
 
         let fireAiTick = runSpiderHost $ do
-                mAsdfTrigger <- liftIO $ readIORef aiTickTriggerRef
-                case mAsdfTrigger of
+                mAiTrigger <- liftIO $ readIORef aiTickTriggerRef
+                case mAiTrigger of
                     Nothing -> return []
                     Just eTrigger -> fire [eTrigger :=> Identity ()] $ return Nothing
 
-            ticker = threadDelay (1000000 `div` 15) >> fireAiTick >> ticker
-
-        playerArbiterCallback <- liftIO $ H.makeArbiterIterator $
+        playerArbiterCallback <- liftIO $ H.makeArbiterIterator
             (\_ arb -> do
                     (s1, s2) <- H.arbiterGetShapes arb
                     ct1 <- get $ H.collisionType s1
@@ -545,18 +552,16 @@ main = do
                     when (ct1 == 1 && ct2 == 0) $ writeIORef playerOnGroundRef True
                     return ())
 
-        hQuit <- subscribeEvent $ quit logicOutput
-
         let hSample = runHostFrame . sample
 
-            appLoop :: Double -> Double -> SpiderHost Global ()
+            appLoop :: Time.UTCTime -> Time.NominalDiffTime -> SpiderHost Global ()
             appLoop oldTime timeAcc = do
-                newTime <- SDL.time
-                let dt = min (newTime - oldTime) 0.25
+                newTime <- liftIO Time.getCurrentTime
+                let dt = min (Time.diffUTCTime newTime oldTime) 0.25
                     timeAcc' = timeAcc + dt
                     stepsToRun = timeAcc' `div'` timeStep
 
-                liftIO $ replicateM_ stepsToRun $ H.step space $ CDouble timeStep
+                liftIO $ replicateM_ stepsToRun $ H.step space $ realToFrac timeStep
 
                 fireEventRef aiTickTriggerRef ()
 
@@ -567,7 +572,6 @@ main = do
                 setPlayerOnGround onGround
 
                 setPressedKeys =<< SDL.getKeyboardState
-                setTime newTime
 
                 fromMaybe (return ()) $ do
                     gamepad <- mGamepad
@@ -602,7 +606,7 @@ main = do
                 liftIO $ withCString currentMummyAnimation $
                     Spriter.entityInstanceSetCurrentAnimation mummyEntityInstance
 
-                let spriterTimeStep = CDouble $ dt * 1000
+                let spriterTimeStep = realToFrac $ dt * 1000
                 liftIO $ do
                     Spriter.entityInstanceSetTimeElapsed playerEntityInstance spriterTimeStep
                     Spriter.entityInstanceSetTimeElapsed mummyEntityInstance spriterTimeStep
@@ -634,11 +638,22 @@ main = do
                 unless shouldQuit $
                     appLoop newTime $ timeAcc' - fromIntegral stepsToRun * timeStep
 
-        tickerId <- liftIO $ forkIO ticker
-        appLoop startTime 0.0
-        liftIO $ killThread tickerId
+        mStartTrigger <- liftIO $ readIORef startTriggerRef
+        _ <- case mStartTrigger of
+            Nothing -> return []
+            Just eTrigger -> fire [eTrigger :=> Identity ()] $ return Nothing
 
-        liftIO $ freeHaskellFunPtr playerArbiterCallback
+        let ticker = threadDelay (1000000 `div` 15) >> fireAiTick >> ticker
+
+        eventTriggerId <- liftIO $ forkIO eventChanTriggerThread
+        tickerId <- liftIO $ forkIO ticker
+
+        appLoop startTime 0.0
+
+        liftIO $ do
+            killThread tickerId
+            killThread eventTriggerId
+            freeHaskellFunPtr playerArbiterCallback
 
     spriterImages <- readIORef loadedImages
     forM_ spriterImages $ \sprPtr -> do
@@ -685,37 +700,37 @@ renderSprite textureRenderer spritePtr spriteStatePtr = do
 convV :: H.Vector -> SDL.Point V2 CInt
 convV (H.Vector x y) = SDL.P $ V2 (floor x) (floor y)
 
-renderShape :: MonadIO m => SDL.Renderer -> V2 CDouble -> (Ptr H.Shape) -> H.ShapeType -> m ()
-renderShape textureRenderer (V2 camX camY) shape (H.Circle radius offset) = do
+renderShape :: MonadIO m => SDL.Renderer -> V2 CDouble -> Ptr H.Shape -> H.ShapeType -> m ()
+renderShape textureRenderer (V2 camX camY) shape shapeType = do
     body <- get $ H.shapeBody shape
-    pos <- get $ H.position $ body
-    angle <- get $ H.angle $ body
+    pos <- get $ H.position body
+    angle <- get $ H.angle body
 
-    let (H.Vector px py) = pos + H.rotate offset (H.fromAngle angle)
-        sdlPos = V2 (floor $ px - camX) (floor $ py - camY)
-        edgePoint = SDL.P $ sdlPos + V2
-            (floor $ cos angle * radius)
-            (floor $ sin angle * radius)
+    case shapeType of
+        (H.Circle radius offset) -> do
 
-    SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
-    SDL.circle textureRenderer sdlPos (floor radius) (V4 255 255 255 255)
-    SDL.drawLine textureRenderer (SDL.P sdlPos) edgePoint
-renderShape textureRenderer (V2 camX camY) shape (H.LineSegment p1 p2 _) = do
-    body <- get $ H.shapeBody shape
-    pos <- get $ H.position $ body
-    SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
-    let camV = H.Vector camX camY
-    SDL.drawLine textureRenderer (convV $ p1 + pos - camV) (convV $ p2 + pos - camV)
-renderShape textureRenderer (V2 camX camY) shape (H.Polygon verts _radius) = do
-    body <- get $ H.shapeBody shape
-    pos <- get $ H.position $ body
-    angle <- get $ H.angle $ body
-    let camV = H.Vector camX camY
-        rot = H.rotate $ H.fromAngle angle
-        sdlVerts = map (\v -> convV $ rot v + pos - camV) $ V.toList verts
-    SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
+            let (H.Vector px py) = pos + H.rotate offset (H.fromAngle angle)
+                sdlPos = V2 (floor $ px - camX) (floor $ py - camY)
+                edgePoint = SDL.P $ sdlPos + V2
+                    (floor $ cos angle * radius)
+                    (floor $ sin angle * radius)
 
-    -- Would crash if there was a polygon without vertices but that should be impossible
-    let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
-    forM_ edges $ uncurry (SDL.drawLine textureRenderer)
-    SDL.drawPoint textureRenderer $ convV $ pos - camV
+            SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
+            SDL.circle textureRenderer sdlPos (floor radius) (V4 255 255 255 255)
+            SDL.drawLine textureRenderer (SDL.P sdlPos) edgePoint
+
+        (H.LineSegment p1 p2 _) -> do
+            SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
+            let camV = H.Vector camX camY
+            SDL.drawLine textureRenderer (convV $ p1 + pos - camV) (convV $ p2 + pos - camV)
+
+        (H.Polygon verts _radius) -> do
+            let camV = H.Vector camX camY
+                rot = H.rotate $ H.fromAngle angle
+                sdlVerts = map (\v -> convV $ rot v + pos - camV) $ V.toList verts
+            SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
+
+            -- Would crash if there was a polygon without vertices but that should be impossible
+            let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
+            forM_ edges $ uncurry (SDL.drawLine textureRenderer)
+            SDL.drawPoint textureRenderer $ convV $ pos - camV
