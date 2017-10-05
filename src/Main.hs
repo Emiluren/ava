@@ -185,6 +185,7 @@ data LogicOutput t = LogicOutput
     , playerForce :: Behavior t H.Vector
     , debugRenderingEnabled :: Behavior t Bool
     , debugRenderCharacters :: Behavior t Bool
+    , debugCollisionChecksEnabled :: Behavior t Bool
     , playerAnimation :: Behavior t String
     , mummyAnimation :: Behavior t String
     , playerDirection :: Behavior t Direction
@@ -318,6 +319,15 @@ main = do
         characterMass = 5
         characterFeetFriction = 2
 
+        mummySideCheckUR = H.Vector characterWidth (-10)
+        mummySideCheckLR = H.Vector characterWidth 10
+        mummySideCheckUL = H.Vector (-characterWidth) (-10)
+        mummySideCheckLL = H.Vector (-characterWidth) 10
+
+        playerKickCheck = ( H.Vector (0.6 * characterWidth) (-17)
+                          , H.Vector (2 * characterWidth) (-17)
+                          )
+
     mummyBody <- H.newBody characterMass $ 1/0
     H.spaceAddBody space mummyBody
     mummyFeetShape <- H.newShape mummyBody characterFeetShapeType
@@ -341,8 +351,8 @@ main = do
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        render :: MonadIO m => V2 CDouble -> V2 Double -> V2 Double -> Bool -> Bool -> m ()
-        render camPos playerPos mummyPos debugRendering characterDbg = do
+        render :: MonadIO m => V2 CDouble -> V2 Double -> V2 Double -> Bool -> Bool -> Bool -> m ()
+        render camPos playerPos mummyPos debugRendering characterDbg colCheckDbg = do
             SDL.rendererRenderTarget textureRenderer $= Just renderTexture
             SDL.rendererDrawColor textureRenderer $= V4 150 150 200 255
             SDL.clear textureRenderer
@@ -355,6 +365,7 @@ main = do
                 Spriter.renderEntityInstance mummyEntityInstance
 
             when debugRendering $ do
+                SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
                 renderShape textureRenderer camPos shelf shelfShapeType
                 renderShape textureRenderer camPos circleShape circleShapeType
 
@@ -362,8 +373,27 @@ main = do
                     renderShape textureRenderer camPos shape shapeType
 
                 when characterDbg $ do
+                    SDL.rendererDrawColor textureRenderer $= V4 100 255 100 255
                     renderShape textureRenderer camPos playerFeetShape characterFeetShapeType
                     renderShape textureRenderer camPos playerBodyShape characterBodyShapeType
+
+                    renderShape textureRenderer camPos mummyFeetShape characterFeetShapeType
+                    renderShape textureRenderer camPos mummyBodyShape characterBodyShapeType
+
+                when colCheckDbg $ do
+                    SDL.rendererDrawColor textureRenderer $= V4 255 0 0 255
+
+                    let characterOffset chrPos = floor <$> fmap CDouble chrPos - camPos
+                        drawCharacterLine chr (p1, p2)= SDL.drawLine textureRenderer
+                            (baseOff + convV p1)
+                            (baseOff + convV p2)
+                            where
+                                baseOff = SDL.P $ characterOffset chr
+
+                    drawCharacterLine mummyPos (mummySideCheckUL, mummySideCheckLL)
+                    drawCharacterLine mummyPos (mummySideCheckUR, mummySideCheckLR)
+
+                    drawCharacterLine playerPos playerKickCheck
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
@@ -415,6 +445,7 @@ main = do
                     eKPressed = pressEvent SDL.KeycodeK
                     eF1Pressed = pressEvent SDL.KeycodeF1
                     eF2Pressed = pressEvent SDL.KeycodeF2
+                    eF3Pressed = pressEvent SDL.KeycodeF3
                     eAPressed = pressEvent SDL.KeycodeA
                     eDPressed = pressEvent SDL.KeycodeD
                     padButtonPress = select sdlEventFan (JoyButtonEvent 0)
@@ -432,12 +463,12 @@ main = do
                         <$> ePadNotCenter
 
                     rightSideSegment pos =
-                        ( pos + H.Vector characterWidth (-20)
-                        , pos + H.Vector characterWidth 20
+                        ( pos + mummySideCheckUR
+                        , pos + mummySideCheckLR
                         )
                     leftSideSegment pos =
-                        ( pos + H.Vector (-characterWidth) (-20)
-                        , pos + H.Vector (-characterWidth) 20
+                        ( pos + mummySideCheckUL
+                        , pos + mummySideCheckLL
                         )
 
                 aiTick <- tickLossy (1/15) startTime
@@ -445,7 +476,8 @@ main = do
                     mummyCheckLeft = leftSideSegment <$> mummyPos <@ aiTick
 
                 debugRendering <- current <$> toggle True eF1Pressed
-                characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
+                characterDbg <- current <$> toggle True (gate debugRendering eF2Pressed)
+                colCheckDbg <- current <$> toggle True (gate debugRendering eF3Pressed)
                 playerDir <- hold DRight $ leftmost
                     [ DLeft <$ eAPressed
                     , DRight <$ eDPressed
@@ -473,6 +505,7 @@ main = do
                     playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
                     ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
                     ePlayerWantsToKick = mconcat [() <$ eKPressed, () <$ ePadXPressed]
+                    ePlayerKick = ePlayerWantsToKick -- TODO: Add check for current player state
 
                     jumpEvent = (-1000) <$ gate playerOnGround ePlayerWantsToJump
 
@@ -504,20 +537,26 @@ main = do
 
                 let mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection
                     mummyMoving = (\(H.Vector vx _) -> abs vx > 0) <$> mummySurfaceVelocity
-                    kickDuration = 0.6 :: Time.NominalDiffTime
+                    kickDuration = 0.6
+                    kickDelay = 0.4
                     pickAnimation moving lastKickTime currentTime =
                         let runOrIdle = if moving then "Run" else "Idle"
                         in case lastKickTime of
                             Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
                             Nothing -> runOrIdle
                     clock = clockLossy (1/60) startTime
+                    playerKickEffect = do
+                        putStrLn "Kick"
 
                 tickInfo <- current <$> clock
                 let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
 
-                latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerWantsToKick
+                latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerKick
+                eDelayedPlayerKick <- delay kickDelay ePlayerKick
 
-                performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime playerEntityInstance 0) <$ ePlayerWantsToKick
+                performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime playerEntityInstance 0) <$ ePlayerKick
+                performEvent_ $ liftIO playerKickEffect <$ eDelayedPlayerKick
+
                 performEvent_ $ jump <$> jumpEvent
 
                 return LogicOutput
@@ -527,6 +566,7 @@ main = do
                         <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround
                     , debugRenderingEnabled = debugRendering
                     , debugRenderCharacters = characterDbg
+                    , debugCollisionChecksEnabled = colCheckDbg
                     , playerAnimation =
                             pickAnimation <$> playerMoving <*> latestPlayerKick <*> timeSinceStart
                     , mummyAnimation = (\moving -> if moving then "Run" else "Idle") <$> mummyMoving
@@ -628,6 +668,7 @@ main = do
 
                 isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput
                 characterDbg <- hSample $ debugRenderCharacters logicOutput
+                colCheckDbg <- hSample $ debugCollisionChecksEnabled logicOutput
                 playerDir <- hSample $ playerDirection logicOutput
                 mummyDir <- hSample $ mummyDirection logicOutput
                 case playerDir of
@@ -644,6 +685,7 @@ main = do
                     (V2 mummyX mummyY)
                     isDebugRenderingEnabled
                     characterDbg
+                    colCheckDbg
 
                 let shouldQuit = any isJust mQuit
                 unless shouldQuit $
