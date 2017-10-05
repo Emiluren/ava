@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables, FlexibleContexts, GADTs, TemplateHaskell #-}
 module Main where
 
-import Control.Concurrent (forkIO, killThread, threadDelay)
+import Control.Concurrent (forkIO, killThread)
 import qualified Control.Concurrent.Chan as Chan
 import Control.Lens ((^.))
 import Control.Monad (unless, replicateM_)
@@ -193,6 +193,13 @@ mutableBehavior startValue = do
     (eUpdateValue, eUpdateValueTriggerRef) <- newEventWithTriggerRef
     value <- runHostFrame $ hold startValue eUpdateValue
     return (value, fireEventRef eUpdateValueTriggerRef)
+
+limit :: (Num a, Ord a, Reflex t) => Behavior t a -> Behavior t a
+limit = fmap limf where
+    limf x
+        | x < -1 = -1
+        | x > 1 = 1
+        | otherwise = x
 
 main :: IO ()
 main = do
@@ -420,6 +427,8 @@ main = do
                         , pos + H.Vector (-characterWidth) 20
                         )
 
+                performEvent_ $ liftIO . print <$> padButtonPress
+
                 aiTick <- tickLossy (1/15) startTime
                 let mummyCheckRight = rightSideSegment <$> mummyPos <@ aiTick
                     mummyCheckLeft = leftSideSegment <$> mummyPos <@ aiTick
@@ -447,7 +456,8 @@ main = do
                     aPressed = ($ SDL.ScancodeA) <$> pressedKeys
                     dPressed = ($ SDL.ScancodeD) <$> pressedKeys
                     playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
-                    playerMovement = CDouble <$> fromMaybe playerKeyMovement mAxis
+                    playerAxisMovement = CDouble <$> fromMaybe (pure 0) mAxis
+                    playerMovement = limit $ (+) <$> playerKeyMovement <*> playerAxisMovement
                     playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
                     playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
                     ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
