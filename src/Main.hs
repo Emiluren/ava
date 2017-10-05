@@ -15,7 +15,6 @@ import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Sum ((==>), DSum(..))
 import Data.Fixed (div')
-import Data.Foldable (asum)
 import Data.GADT.Compare.TH
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Maybe (isJust, fromMaybe)
@@ -480,8 +479,7 @@ main = do
                         )
 
                 aiTick <- tickLossy (1/15) startTime
-                let mummyCheckRight = rightSideSegment <$> mummyPos <@ aiTick
-                    mummyCheckLeft = leftSideSegment <$> mummyPos <@ aiTick
+                let queryLineSeg :: MonadIO m => (H.Vector, H.Vector) -> m H.SegmentQueryInfo
                     queryLineSeg (s, e) = liftIO $ H.spaceSegmentQueryFirst space s e 1 groundCheckFilter
 
                 debugRendering <- current <$> toggle True eF1Pressed
@@ -493,13 +491,7 @@ main = do
                     , ePadChangeDir
                     ]
 
-                colForRightSeg <- performEvent $ queryLineSeg <$> mummyCheckRight
-                colForLeftSeg <- performEvent $ queryLineSeg <$> mummyCheckLeft
-
-                let eMummyCanGoRight = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForRightSeg
-                    eMummyCanGoLeft = (\sqi -> nullPtr /= H.segQueryInfoShape sqi) <$> colForLeftSeg
-
-                    aPressed = ($ SDL.ScancodeA) <$> pressedKeys
+                let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
                     dPressed = ($ SDL.ScancodeD) <$> pressedKeys
                     playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
                     playerAxisMovement = CDouble <$> fromMaybe (pure 0) mAxis
@@ -522,20 +514,50 @@ main = do
 
                     jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) H.zero
 
-                mummyWalkDirection <- foldDynMaybe
-                    (\checks currentDir ->
-                         asum $ fmap
-                             (\(dir, canGo) ->
-                                  if dir == currentDir && not canGo then
-                                      Just AiStay
-                                  else if currentDir == AiStay && canGo then
-                                      Just dir
-                                  else
-                                      Nothing)
-                             checks)
-                    AiStay
-                    $ mergeList [(,) AiLeft <$> eMummyCanGoLeft, (,) AiRight <$> eMummyCanGoRight]
+                    doAiCollisionChecks mp = liftIO $ do
+                        let (pkc1r, pkc2r) = playerKickCheckR
+                            (pkc1l, pkc2l) = playerKickCheckL
+                            segsToCheck =
+                                [ rightSideSegment mp
+                                , leftSideSegment mp
+                                , (pkc1l + mp, pkc2l + mp)
+                                , (pkc1r + mp, pkc2r + mp)
+                                ]
 
+                        [cgl, cgr, cwl, cwr] <- forM segsToCheck $ \seg -> do
+                            segHitInfo <- queryLineSeg seg
+                            return $ H.segQueryInfoShape segHitInfo /= nullPtr
+                        return (cgl, cgr, cwl, cwr)
+
+                    runAiLogic (colGroundLeft, colGroundRight, colWallLeft, colWallRight) currentDir =
+                        let canGoLeft = colGroundLeft && not colWallLeft
+                            canGoRight = colGroundRight && not colWallRight
+                        in case currentDir of
+                            AiLeft ->
+                                if canGoLeft then
+                                    Nothing
+                                else if canGoRight then
+                                    Just AiRight
+                                else
+                                    Just AiStay
+                            AiRight ->
+                                if canGoRight then
+                                    Nothing
+                                else if canGoLeft then
+                                    Just AiLeft
+                                else
+                                    Just AiStay
+                            AiStay ->
+                                if canGoRight then
+                                    Just AiRight
+                                else if canGoLeft then
+                                    Just AiLeft
+                                else
+                                    Nothing
+
+                colResults <- performEvent $ doAiCollisionChecks <$> mummyPos <@ aiTick
+
+                mummyWalkDirection <- foldDynMaybe runAiLogic AiStay colResults
                 mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection $ updated mummyWalkDirection
 
                 let mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection
@@ -548,6 +570,7 @@ main = do
                             Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
                             Nothing -> runOrIdle
                     clock = clockLossy (1/60) startTime
+                    playerKickEffect :: MonadIO m => H.Vector -> Direction -> m ()
                     playerKickEffect playerP playerD = do
                         let (pkc1, pkc2) = case playerD of
                                 DRight -> playerKickCheckR
