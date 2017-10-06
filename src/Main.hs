@@ -327,11 +327,11 @@ main = do
 
         playerKickCheckR =
             ( H.Vector characterSide (-17)
-            , H.Vector (2 * characterSide) (-17)
+            , H.Vector (2.2 * characterSide) (-17)
             )
         playerKickCheckL =
             ( H.Vector (- characterSide) (-17)
-            , H.Vector (- 2 * characterSide) (-17)
+            , H.Vector (- 2.2 * characterSide) (-17)
             )
 
     mummyBody <- H.newBody characterMass $ 1/0
@@ -569,8 +569,8 @@ main = do
                                 DRight -> playerKickCheckR
                                 DLeft -> playerKickCheckL
                             playerKickVec = case playerD of
-                                DRight -> H.Vector 1000 0
-                                DLeft -> H.Vector (-1000) 0
+                                DRight -> H.Vector 1000 (-1000)
+                                DLeft -> H.Vector (-1000) (-1000)
 
                         hitShapeInfo <- queryLineSeg (playerP + pkc1, playerP + pkc2)
 
