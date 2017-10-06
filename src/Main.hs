@@ -159,6 +159,10 @@ data Direction = DLeft | DRight deriving (Eq, Show)
 
 data AiDir = AiLeft | AiStay | AiRight deriving (Eq, Show)
 
+data Renderable
+    = AnimatedSprite (Ptr Spriter.CEntityInstance) String (V2 CDouble) Direction
+    | Line (V2 Double) (V2 Double) (V4 Word8)
+
 aiDirToDirection :: AiDir -> Maybe Direction
 aiDirToDirection AiStay = Nothing
 aiDirToDirection AiLeft = Just DLeft
@@ -186,10 +190,7 @@ data LogicOutput t = LogicOutput
     , debugRenderingEnabled :: Behavior t Bool
     , debugRenderCharacters :: Behavior t Bool
     , debugCollisionChecksEnabled :: Behavior t Bool
-    , playerAnimation :: Behavior t String
-    , mummyAnimation :: Behavior t String
-    , playerDirection :: Behavior t Direction
-    , mummyDirection :: Behavior t Direction
+    , renderCommands :: Behavior t [Renderable]
     , quit :: Event t ()
     }
 
@@ -266,7 +267,6 @@ main = do
     H.gravity space $= H.Vector 0 400
 
     wall <- H.spaceGetStaticBody space
-    --H.position wall $= H.Vector 0 0
 
     let shelfShapeType = H.LineSegment startV endV 1
     shelf <- H.newShape wall shelfShapeType
@@ -357,51 +357,59 @@ main = do
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        render :: MonadIO m => V2 CDouble -> V2 Double -> V2 Double -> Bool -> Bool -> Bool -> m ()
-        render camPos playerPos mummyPos debugRendering characterDbg colCheckDbg = do
+        render :: MonadIO m => V2 CDouble -> [Renderable] -> Bool -> Bool -> Bool -> m ()
+        render camOffset renderables debugRendering characterDbg colCheckDbg = do
             SDL.rendererRenderTarget textureRenderer $= Just renderTexture
             SDL.rendererDrawColor textureRenderer $= V4 150 150 200 255
             SDL.clear textureRenderer
 
-            liftIO $ do
-                Spriter.setEntityInstancePosition playerEntityInstance ((CDouble <$> playerPos) - camPos)
-                Spriter.renderEntityInstance playerEntityInstance
-
-                Spriter.setEntityInstancePosition mummyEntityInstance ((CDouble <$> mummyPos) - camPos)
-                Spriter.renderEntityInstance mummyEntityInstance
+            liftIO $ forM_ renderables $ \renderable ->
+                case renderable of
+                    AnimatedSprite entityInstance animation position direction -> do
+                        withCString animation $ Spriter.setEntityInstanceCurrentAnimation entityInstance
+                        case direction of
+                            DRight -> Spriter.setEntityInstanceScale entityInstance $ V2 1 1
+                            DLeft -> Spriter.setEntityInstanceScale entityInstance $ V2 (-1) 1
+                        Spriter.setEntityInstancePosition entityInstance (position - camOffset)
+                        Spriter.renderEntityInstance entityInstance
+                    Line (V2 x1 y1) (V2 x2 y2) color -> do
+                        SDL.rendererDrawColor textureRenderer $= color
+                        SDL.drawLine textureRenderer
+                            (SDL.P $ V2 (floor x1) (floor y1))
+                            (SDL.P $ V2 (floor x2) (floor y2))
 
             when debugRendering $ do
                 SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
-                renderShape textureRenderer camPos shelf shelfShapeType
-                renderShape textureRenderer camPos circleShape circleShapeType
+                renderShape textureRenderer camOffset shelf shelfShapeType
+                renderShape textureRenderer camOffset circleShape circleShapeType
 
-                forM_ wallShapes $ uncurry (renderShape textureRenderer camPos)
+                forM_ wallShapes $ uncurry (renderShape textureRenderer camOffset)
 
                 when characterDbg $ do
                     SDL.rendererDrawColor textureRenderer $= V4 100 255 100 255
-                    renderShape textureRenderer camPos playerFeetShape characterFeetShapeType
-                    renderShape textureRenderer camPos playerBodyShape characterBodyShapeType
+                    renderShape textureRenderer camOffset playerFeetShape characterFeetShapeType
+                    renderShape textureRenderer camOffset playerBodyShape characterBodyShapeType
 
-                    renderShape textureRenderer camPos mummyFeetShape characterFeetShapeType
-                    renderShape textureRenderer camPos mummyBodyShape characterBodyShapeType
+                    renderShape textureRenderer camOffset mummyFeetShape characterFeetShapeType
+                    renderShape textureRenderer camOffset mummyBodyShape characterBodyShapeType
 
-                when colCheckDbg $ do
-                    SDL.rendererDrawColor textureRenderer $= V4 255 0 0 255
+                -- when colCheckDbg $ do
+                --     SDL.rendererDrawColor textureRenderer $= V4 255 0 0 255
 
-                    let characterOffset chrPos = floor <$> fmap CDouble chrPos - camPos
-                        drawCharacterLine chr (p1, p2)= SDL.drawLine textureRenderer
-                            (baseOff + convV p1)
-                            (baseOff + convV p2)
-                            where
-                                baseOff = SDL.P $ characterOffset chr
+                --     let characterOffset chrPos = floor <$> fmap CDouble chrPos - camOffset
+                --         drawCharacterLine chr (p1, p2)= SDL.drawLine textureRenderer
+                --             (baseOff + convV p1)
+                --             (baseOff + convV p2)
+                --             where
+                --                 baseOff = SDL.P $ characterOffset chr
 
-                    drawCharacterLine mummyPos (mummySideCheckUL, mummySideCheckLL)
-                    drawCharacterLine mummyPos (mummySideCheckUR, mummySideCheckLR)
+                    -- drawCharacterLine mummyPos (mummySideCheckUL, mummySideCheckLL)
+                    -- drawCharacterLine mummyPos (mummySideCheckUR, mummySideCheckLR)
 
-                    drawCharacterLine playerPos playerKickCheckR
-                    drawCharacterLine playerPos playerKickCheckL
-                    drawCharacterLine mummyPos playerKickCheckR
-                    drawCharacterLine mummyPos playerKickCheckL
+                    -- drawCharacterLine playerPos playerKickCheckR
+                    -- drawCharacterLine playerPos playerKickCheckL
+                    -- drawCharacterLine mummyPos playerKickCheckR
+                    -- drawCharacterLine mummyPos playerKickCheckL
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
@@ -594,19 +602,23 @@ main = do
 
                 performEvent_ $ jump <$> jumpEvent
 
+                let playerAnimation =
+                        pickAnimation <$> playerMoving <*> playerOnGround <*> latestPlayerKick <*> timeSinceStart
+                    mummyAnimation = (\moving -> if moving then "Walk" else "Idle") <$> mummyMoving
+                    toV2 (H.Vector x y) = V2 x y
+
                 return LogicOutput
                     { playerSurfaceVel = playerSurfaceVelocity
                     , mummySurfaceVel = mummySurfaceVelocity
                     , playerForce = bool
                         <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround
+                    , renderCommands = sequenceA
+                        [ AnimatedSprite playerEntityInstance <$> playerAnimation <*> fmap toV2 playerPos <*> playerDir
+                        , AnimatedSprite mummyEntityInstance <$> mummyAnimation <*> fmap toV2 mummyPos <*> mummyDisplayDir
+                        ]
                     , debugRenderingEnabled = debugRendering
                     , debugRenderCharacters = characterDbg
                     , debugCollisionChecksEnabled = colCheckDbg
-                    , playerAnimation =
-                            pickAnimation <$> playerMoving <*> playerOnGround <*> latestPlayerKick <*> timeSinceStart
-                    , mummyAnimation = (\moving -> if moving then "Walk" else "Idle") <$> mummyMoving
-                    , playerDirection = playerDir
-                    , mummyDirection = mummyDisplayDir
                     , quit = () <$ pressEvent SDL.KeycodeQ
                     }
 
@@ -619,9 +631,7 @@ main = do
 
         let eventChanTriggerThread = do
                 eventTriggers <- Chan.readChan eventChan
-                --putStrLn "yolo"
                 runSpiderHost $ forM_ eventTriggers $ \(EventTriggerRef triggerRef :=> TriggerInvocation value onComplete) -> do
-                    --liftIO $ putStrLn "swag"
                     mTrigger <- liftIO $ readIORef triggerRef
                     lmQuit <- case mTrigger of
                         Nothing -> return []
@@ -681,16 +691,8 @@ main = do
                 currentPlayerForce <- hSample $ playerForce logicOutput
                 H.force playerBody $= currentPlayerForce
 
-                currentPlayerAnimation <- hSample $ playerAnimation logicOutput
-                liftIO $ withCString currentPlayerAnimation $
-                    Spriter.setEntityInstanceCurrentAnimation playerEntityInstance
-
                 currentMummySurfaceVel <- hSample $ mummySurfaceVel logicOutput
                 H.surfaceVel mummyFeetShape $= currentMummySurfaceVel
-
-                currentMummyAnimation <- hSample $ mummyAnimation logicOutput
-                liftIO $ withCString currentMummyAnimation $
-                    Spriter.setEntityInstanceCurrentAnimation mummyEntityInstance
 
                 let spriterTimeStep = realToFrac $ dt * 1000
                 liftIO $ do
@@ -698,27 +700,19 @@ main = do
                     Spriter.setEntityInstanceTimeElapsed mummyEntityInstance spriterTimeStep
 
                 currentPlayerPos@(H.Vector (CDouble playerX) (CDouble playerY)) <- get $ H.position playerBody
-                currentMummyPos@(H.Vector (CDouble mummyX) (CDouble mummyY)) <- get $ H.position mummyBody
+                currentMummyPos <- get $ H.position mummyBody
                 setPlayerPos currentPlayerPos
                 setMummyPos currentMummyPos
 
                 isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput
                 characterDbg <- hSample $ debugRenderCharacters logicOutput
                 colCheckDbg <- hSample $ debugCollisionChecksEnabled logicOutput
-                playerDir <- hSample $ playerDirection logicOutput
-                mummyDir <- hSample $ mummyDirection logicOutput
-                case playerDir of
-                    DRight -> liftIO $ Spriter.setEntityInstanceScale playerEntityInstance $ V2 1 1
-                    DLeft -> liftIO $ Spriter.setEntityInstanceScale playerEntityInstance $ V2 (-1) 1
-                case mummyDir of
-                    DRight -> liftIO $ Spriter.setEntityInstanceScale mummyEntityInstance $ V2 1 1
-                    DLeft -> liftIO $ Spriter.setEntityInstanceScale mummyEntityInstance $ V2 (-1) 1
+                renderables <- hSample $ renderCommands logicOutput
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
 
                 render
                     (CDouble <$> V2 playerX playerY - camOffset)
-                    (V2 playerX playerY)
-                    (V2 mummyX mummyY)
+                    renderables
                     isDebugRenderingEnabled
                     characterDbg
                     colCheckDbg
