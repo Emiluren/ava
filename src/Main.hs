@@ -557,8 +557,11 @@ main = do
                     mummyMoving = (\(H.Vector vx _) -> abs vx > 0) <$> mummySurfaceVelocity
                     kickDuration = 0.6
                     kickDelay = 0.4
-                    pickAnimation moving lastKickTime currentTime =
-                        let runOrIdle = if moving then "Run" else "Idle"
+                    pickAnimation moving onGround lastKickTime currentTime =
+                        let runOrIdle
+                                | not onGround = "Falling"
+                                | moving = "Run"
+                                | otherwise = "Idle"
                         in case lastKickTime of
                             Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
                             Nothing -> runOrIdle
@@ -600,7 +603,7 @@ main = do
                     , debugRenderCharacters = characterDbg
                     , debugCollisionChecksEnabled = colCheckDbg
                     , playerAnimation =
-                            pickAnimation <$> playerMoving <*> latestPlayerKick <*> timeSinceStart
+                            pickAnimation <$> playerMoving <*> playerOnGround <*> latestPlayerKick <*> timeSinceStart
                     , mummyAnimation = (\moving -> if moving then "Run" else "Idle") <$> mummyMoving
                     , playerDirection = playerDir
                     , mummyDirection = mummyDisplayDir
