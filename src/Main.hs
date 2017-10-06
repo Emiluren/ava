@@ -506,8 +506,8 @@ main = do
 
                     jumpEvent = (-1000) <$ gate playerOnGround ePlayerWantsToJump
 
-                    mummySpeed AiRight = H.Vector (- playerSpeed / 4) 0
-                    mummySpeed AiLeft = H.Vector (playerSpeed / 4) 0
+                    mummySpeed AiRight = H.Vector (- playerSpeed / 6) 0
+                    mummySpeed AiLeft = H.Vector (playerSpeed / 6) 0
                     mummySpeed AiStay = H.zero
 
                     playerSurfaceVelocity = bool
@@ -604,7 +604,7 @@ main = do
                     , debugCollisionChecksEnabled = colCheckDbg
                     , playerAnimation =
                             pickAnimation <$> playerMoving <*> playerOnGround <*> latestPlayerKick <*> timeSinceStart
-                    , mummyAnimation = (\moving -> if moving then "Run" else "Idle") <$> mummyMoving
+                    , mummyAnimation = (\moving -> if moving then "Walk" else "Idle") <$> mummyMoving
                     , playerDirection = playerDir
                     , mummyDirection = mummyDisplayDir
                     , quit = () <$ pressEvent SDL.KeycodeQ
