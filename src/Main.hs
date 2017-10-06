@@ -163,6 +163,7 @@ data AiDir = AiLeft | AiStay | AiRight deriving (Eq, Show)
 data Renderable
     = AnimatedSprite (Ptr Spriter.CEntityInstance) String (V2 CDouble) Direction
     | Line (V4 Word8) (V2 CDouble) (V2 CDouble)
+    | Shape (Ptr H.Shape) H.ShapeType
 
 aiDirToDirection :: AiDir -> Maybe Direction
 aiDirToDirection AiStay = Nothing
@@ -188,8 +189,6 @@ data LogicOutput t = LogicOutput
     { playerSurfaceVel :: Behavior t H.Vector
     , mummySurfaceVel :: Behavior t H.Vector
     , playerForce :: Behavior t H.Vector
-    , debugRenderingEnabled :: Behavior t Bool
-    , debugRenderCharacters :: Behavior t Bool
     , renderCommands :: Behavior t [Renderable]
     , quit :: Event t ()
     }
@@ -357,8 +356,8 @@ main = do
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     let
-        render :: MonadIO m => V2 CDouble -> [Renderable] -> Bool -> Bool -> m ()
-        render camOffset renderables debugRendering characterDbg = do
+        render :: MonadIO m => V2 CDouble -> [Renderable] -> m ()
+        render camOffset renderables = do
             SDL.rendererRenderTarget textureRenderer $= Just renderTexture
             SDL.rendererDrawColor textureRenderer $= V4 150 150 200 255
             SDL.clear textureRenderer
@@ -379,21 +378,8 @@ main = do
                         SDL.drawLine textureRenderer
                             (SDL.P $ V2 (floor x1) (floor y1))
                             (SDL.P $ V2 (floor x2) (floor y2))
-
-            when debugRendering $ do
-                SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
-                renderShape textureRenderer camOffset shelf shelfShapeType
-                renderShape textureRenderer camOffset circleShape circleShapeType
-
-                forM_ wallShapes $ uncurry (renderShape textureRenderer camOffset)
-
-                when characterDbg $ do
-                    SDL.rendererDrawColor textureRenderer $= V4 100 255 100 255
-                    renderShape textureRenderer camOffset playerFeetShape characterFeetShapeType
-                    renderShape textureRenderer camOffset playerBodyShape characterBodyShapeType
-
-                    renderShape textureRenderer camOffset mummyFeetShape characterFeetShapeType
-                    renderShape textureRenderer camOffset mummyBodyShape characterBodyShapeType
+                    Shape shape shapeType ->
+                        renderShape textureRenderer camOffset shape shapeType
 
             SDL.rendererRenderTarget textureRenderer $= Nothing
             (V2 ww wh) <- get $ SDL.windowSize window
@@ -601,7 +587,18 @@ main = do
                     renderColDebug = do
                         mummyP <- mummyPos
                         playerP <- playerPos
-                        let chrLine chrP (p1, p2) =
+                        let renderShapes =
+                                [ Shape shelf shelfShapeType
+                                , Shape circleShape circleShapeType
+                                ]
+                                ++ (uncurry Shape <$> wallShapes)
+                            renderCharacterColliders =
+                                [ Shape playerFeetShape characterFeetShapeType
+                                , Shape mummyFeetShape characterFeetShapeType
+                                , Shape playerBodyShape characterBodyShapeType
+                                , Shape mummyBodyShape characterBodyShapeType
+                                ]
+                            chrLine chrP (p1, p2) =
                                 Line (V4 255 0 0 255) (toV2 $ p1 + chrP) (toV2 $ p2 + chrP)
                             renderSideChecks =
                                 [ chrLine mummyP (mummySideCheckUL, mummySideCheckLL)
@@ -613,11 +610,14 @@ main = do
                                 ]
 
                         debugRender <- debugRendering
+                        dbgRenderChrs <- characterDbg
                         dbgRenderCol <- colCheckDbg
-                        if not debugRender || not dbgRenderCol then
-                            return []
-                        else
-                            return renderSideChecks
+                        case (debugRender, dbgRenderChrs, dbgRenderCol) of
+                            (False, _, _) -> return []
+                            (True, False, False) -> return renderShapes
+                            (True, True, False) -> return $ renderShapes ++ renderCharacterColliders
+                            (True, False, True) -> return $ renderShapes ++ renderSideChecks
+                            (True, True, True) -> return $ renderShapes ++ renderCharacterColliders ++ renderSideChecks
 
                 return LogicOutput
                     { playerSurfaceVel = playerSurfaceVelocity
@@ -625,8 +625,6 @@ main = do
                     , playerForce = bool
                         <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround
                     , renderCommands = renderCharacters <> renderColDebug
-                    , debugRenderingEnabled = debugRendering
-                    , debugRenderCharacters = characterDbg
                     , quit = () <$ pressEvent SDL.KeycodeQ
                     }
 
@@ -712,16 +710,10 @@ main = do
                 setPlayerPos currentPlayerPos
                 setMummyPos currentMummyPos
 
-                isDebugRenderingEnabled <- hSample $ debugRenderingEnabled logicOutput
-                characterDbg <- hSample $ debugRenderCharacters logicOutput
                 renderables <- hSample $ renderCommands logicOutput
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
 
-                render
-                    (CDouble <$> V2 playerX playerY - camOffset)
-                    renderables
-                    isDebugRenderingEnabled
-                    characterDbg
+                render (CDouble <$> V2 playerX playerY - camOffset) renderables
 
                 let shouldQuit = any isJust mQuit
                 unless shouldQuit $
