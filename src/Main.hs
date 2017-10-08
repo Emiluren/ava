@@ -209,6 +209,58 @@ limit = fmap limf where
         | x > 1 = 1
         | otherwise = x
 
+makeCharacterBody :: H.CpFloat -> H.CpFloat -> [H.Vector]
+makeCharacterBody w h =
+    [ H.Vector (-w * 0.5) (-h * 0.2)
+    , H.Vector (-w * 0.5) (-h * 0.8)
+    , H.Vector (-w * 0.3) (-h)
+    , H.Vector (w * 0.3) (-h)
+    , H.Vector (w * 0.5) (-h * 0.8)
+    , H.Vector (w * 0.5) (-h * 0.2)
+    , H.Vector (w * 0.3) (-h * 0.1)
+    , H.Vector (-w * 0.3) (-h * 0.1)
+    ]
+
+characterWidth, characterHeight, characterMass, characterFeetFriction, characterSide :: H.CpFloat
+characterWidth = 10
+characterHeight = 30
+characterMass = 5
+characterFeetFriction = 2
+characterSide = characterWidth * 0.7
+
+characterFeetShapeType, characterBodyShapeType :: H.ShapeType
+characterFeetShapeType = H.Circle (characterWidth * 0.3) (H.Vector 0 $ - characterWidth * 0.2)
+characterBodyShapeType = H.Polygon (V.fromList $ reverse $ makeCharacterBody characterWidth characterHeight) 0
+
+playerKickCheckR, playerKickCheckL :: (H.Vector, H.Vector)
+playerKickCheckR =
+    ( H.Vector characterSide (-17)
+    , H.Vector (2.2 * characterSide) (-17)
+    )
+playerKickCheckL =
+    ( H.Vector (- characterSide) (-17)
+    , H.Vector (- 2.2 * characterSide) (-17)
+    )
+
+mummySideCheckUR, mummySideCheckLR, mummySideCheckUL, mummySideCheckLL :: H.Vector
+mummySideCheckUR = H.Vector characterSide (-10)
+mummySideCheckLR = H.Vector characterSide 10
+mummySideCheckUL = H.Vector (-characterSide) (-10)
+mummySideCheckLL = H.Vector (-characterSide) 10
+
+makeCharacter :: Ptr H.Space -> IO (Ptr H.Body, Ptr H.Shape, Ptr H.Shape)
+makeCharacter space = do
+    characterBody <- H.newBody characterMass $ 1/0
+    H.spaceAddBody space characterBody
+    characterFeetShape <- H.newShape characterBody characterFeetShapeType
+    characterBodyShape <- H.newShape characterBody characterBodyShapeType
+    H.spaceAddShape space characterFeetShape
+    H.spaceAddShape space characterBodyShape
+    H.friction characterFeetShape $= characterFeetFriction
+    H.friction characterBodyShape $= 0
+
+    return (characterBody, characterFeetShape, characterBodyShape)
+
 main :: IO ()
 main = do
     SDL.initializeAll
@@ -300,59 +352,11 @@ main = do
     H.spaceAddShape space circleShape
     H.position circleBody $= H.Vector 200 20
 
-    let makeCharacterBody w h =
-            [ H.Vector (-w * 0.5) (-h * 0.2)
-            , H.Vector (-w * 0.5) (-h * 0.8)
-            , H.Vector (-w * 0.3) (-h)
-            , H.Vector (w * 0.3) (-h)
-            , H.Vector (w * 0.5) (-h * 0.8)
-            , H.Vector (w * 0.5) (-h * 0.2)
-            , H.Vector (w * 0.3) (-h * 0.1)
-            , H.Vector (-w * 0.3) (-h * 0.1)
-            ]
-        characterWidth = 10
-        characterHeight = 30
-        characterFeetShapeType = H.Circle (characterWidth * 0.3) (H.Vector 0 $ - characterWidth * 0.2)
-        characterBodyShapeType = H.Polygon (V.fromList $ reverse $ makeCharacterBody characterWidth characterHeight) 0
-        characterMass = 5
-        characterFeetFriction = 2
-        characterSide = characterWidth * 0.7
-
-        mummySideCheckUR = H.Vector characterSide (-10)
-        mummySideCheckLR = H.Vector characterSide 10
-        mummySideCheckUL = H.Vector (-characterSide) (-10)
-        mummySideCheckLL = H.Vector (-characterSide) 10
-
-        playerKickCheckR =
-            ( H.Vector characterSide (-17)
-            , H.Vector (2.2 * characterSide) (-17)
-            )
-        playerKickCheckL =
-            ( H.Vector (- characterSide) (-17)
-            , H.Vector (- 2.2 * characterSide) (-17)
-            )
-
-    mummyBody <- H.newBody characterMass $ 1/0
-    H.spaceAddBody space mummyBody
-    mummyFeetShape <- H.newShape mummyBody characterFeetShapeType
-    mummyBodyShape <- H.newShape mummyBody characterBodyShapeType
-    H.spaceAddShape space mummyFeetShape
-    H.spaceAddShape space mummyBodyShape
-    H.friction mummyFeetShape $= characterFeetFriction
-    H.friction mummyBodyShape $= 0
-    H.position mummyBody $= H.Vector 110 200
-    --H.collisionType mummyFeetShape $= playerFeetCollisionType
-
-    playerBody <- H.newBody characterMass (1/0)
-    H.spaceAddBody space playerBody
-    playerFeetShape <- H.newShape playerBody characterFeetShapeType
-    playerBodyShape <- H.newShape playerBody characterBodyShapeType
-    H.spaceAddShape space playerFeetShape
-    H.spaceAddShape space playerBodyShape
-    H.friction playerFeetShape $= characterFeetFriction
-    H.friction playerBodyShape $= 0
+    (playerBody, playerFeetShape, playerBodyShape) <- makeCharacter space
+    (mummyBody, mummyFeetShape, mummyBodyShape) <- makeCharacter space
     H.position playerBody $= H.Vector 240 100
     H.collisionType playerFeetShape $= playerFeetCollisionType
+    H.position mummyBody $= H.Vector 110 200
 
     let
         render :: MonadIO m => V2 CDouble -> [Renderable] -> m ()
@@ -426,6 +430,8 @@ main = do
                     (PerformEventT (SpiderTimeline Global) (SpiderHost Global)))
                 (LogicOutput (SpiderTimeline Global))
             mainReflex = do
+                eInit <- getPostBuild
+
                 let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
                     eWPressed = pressEvent SDL.KeycodeW
                     eKPressed = pressEvent SDL.KeycodeK
@@ -639,7 +645,7 @@ main = do
                     (s1, s2) <- H.arbiterGetShapes arb
                     ct1 <- get $ H.collisionType s1
                     ct2 <- get $ H.collisionType s2
-                    when (ct1 == 1 && ct2 == 0) $ writeIORef playerOnGroundRef True
+                    when (ct1 == playerFeetCollisionType && ct2 == 0) $ writeIORef playerOnGroundRef True
                     return ())
 
         let hSample = runHostFrame . sample
