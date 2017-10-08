@@ -192,6 +192,93 @@ data LogicOutput t = LogicOutput
     , quit :: Event t ()
     }
 
+data EnemyType = Mummy
+
+data ObjectType = Ball
+
+data LevelData = LevelData
+    { playerStartPosition :: H.Vector
+    , wallEdges :: [(H.Vector, H.Vector)]
+    , initEnemies :: [(EnemyType, H.Vector)]
+    , extraObjects :: [(ObjectType, H.Vector)]
+    }
+
+type CharacterPhysicsRefs = (Ptr H.Shape, Ptr H.Shape)
+
+data LevelPhysicsRefs = LevelPhysicsRefs
+    { playerPhysicsRefs :: CharacterPhysicsRefs
+    , aiPhysicsRefs :: [CharacterPhysicsRefs]
+    , extraPhysicsRefs :: [(Ptr H.Shape, H.ShapeType)]
+    , levelSpace :: Ptr H.Space
+    }
+
+testLevel :: LevelData
+testLevel =
+    let tl = H.Vector 0 0
+        bl = H.Vector 0 400
+        tr = H.Vector 400 0
+        br = H.Vector 400 400
+
+        corners = [tl, H.Vector (-200) (-10), H.Vector (-200) 360, bl, H.Vector 150 380, br, tr]
+        edges = zip corners $ tail corners ++ [head corners]
+    in LevelData
+       { wallEdges = edges
+       , playerStartPosition = H.Vector 240 100
+       , initEnemies = [(Mummy, H.Vector 110 200)]
+       , extraObjects = [(Ball, H.Vector 200 20)]
+       }
+
+
+initLevel :: LevelData -> IO LevelPhysicsRefs
+initLevel levelData = do
+    putStrLn "Creating chipmunk space"
+    space <- H.newSpace
+    H.gravity space $= H.Vector 0 400
+
+    wall <- H.spaceGetStaticBody space
+
+    let shelfShapeType = H.LineSegment startV endV 1
+    shelf <- H.newShape wall shelfShapeType
+    H.friction shelf $= 1.0
+    H.elasticity shelf $= 0.6
+    H.spaceAddShape space shelf
+
+    wallShapes <- forM (wallEdges levelData) $ \(start, end) -> do
+        let wst = H.LineSegment start end 1
+        w <- H.newShape wall wst
+        H.friction w $= 1.0
+        H.elasticity w $= 0.6
+        H.spaceAddShape space w
+        return (w, wst)
+
+    let circleMoment = H.momentForCircle circleMass (0, circleRadius) (H.Vector 0 0)
+
+    circleBody <- H.newBody circleMass circleMoment
+    H.spaceAddBody space circleBody
+
+    let circleShapeType = H.Circle circleRadius H.zero
+    circleShape <- H.newShape circleBody circleShapeType
+    H.friction circleShape $= 1.0
+    H.elasticity circleShape $= 0.9
+    H.spaceAddShape space circleShape
+    H.position circleBody $= H.Vector 200 20
+
+    playerRefs@(playerFeetShape, _) <- makeCharacter space
+    playerBody <- get $ H.shapeBody playerFeetShape
+    mummyRefs@(mummyFeetShape, _) <- makeCharacter space
+    mummyBody <- get $ H.shapeBody mummyFeetShape
+
+    H.position playerBody $= playerStartPosition levelData
+    H.collisionType playerFeetShape $= playerFeetCollisionType
+    H.position mummyBody $= H.Vector 110 200
+
+    return LevelPhysicsRefs
+        { playerPhysicsRefs = playerRefs
+        , aiPhysicsRefs = [ mummyRefs ]
+        , extraPhysicsRefs = wallShapes ++ [(circleShape, circleShapeType), (shelf, shelfShapeType)]
+        , levelSpace = space
+        }
+
 renderTextureSize :: Num a => a
 renderTextureSize = 512
 
@@ -248,7 +335,7 @@ mummySideCheckLR = H.Vector characterSide 10
 mummySideCheckUL = H.Vector (-characterSide) (-10)
 mummySideCheckLL = H.Vector (-characterSide) 10
 
-makeCharacter :: Ptr H.Space -> IO (Ptr H.Body, Ptr H.Shape, Ptr H.Shape)
+makeCharacter :: Ptr H.Space -> IO CharacterPhysicsRefs
 makeCharacter space = do
     characterBody <- H.newBody characterMass $ 1/0
     H.spaceAddBody space characterBody
@@ -259,7 +346,7 @@ makeCharacter space = do
     H.friction characterFeetShape $= characterFeetFriction
     H.friction characterBodyShape $= 0
 
-    return (characterBody, characterFeetShape, characterBodyShape)
+    return (characterFeetShape, characterBodyShape)
 
 main :: IO ()
 main = do
@@ -312,51 +399,7 @@ main = do
     mummyEntityInstance <- withCString "Mummy" $ Spriter.modelGetNewEntityInstance mummySpriterModel
     withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation mummyEntityInstance
 
-    putStrLn "Creating chipmunk space"
-    space <- H.newSpace
-    H.gravity space $= H.Vector 0 400
-
-    wall <- H.spaceGetStaticBody space
-
-    let shelfShapeType = H.LineSegment startV endV 1
-    shelf <- H.newShape wall shelfShapeType
-    H.friction shelf $= 1.0
-    H.elasticity shelf $= 0.6
-    H.spaceAddShape space shelf
-
-    let tl = H.Vector 0 0
-        bl = H.Vector 0 400
-        tr = H.Vector 400 0
-        br = H.Vector 400 400
-
-        corners = [tl, H.Vector (-200) (-10), H.Vector (-200) 360, bl, H.Vector 150 380, br, tr]
-        edges = zip corners $ tail corners ++ [head corners]
-
-    wallShapes <- forM edges $ \(start, end) -> do
-        let wst = H.LineSegment start end 1
-        w <- H.newShape wall wst
-        H.friction w $= 1.0
-        H.elasticity w $= 0.6
-        H.spaceAddShape space w
-        return (w, wst)
-
-    let circleMoment = H.momentForCircle circleMass (0, circleRadius) (H.Vector 0 0)
-
-    circleBody <- H.newBody circleMass circleMoment
-    H.spaceAddBody space circleBody
-
-    let circleShapeType = H.Circle circleRadius H.zero
-    circleShape <- H.newShape circleBody circleShapeType
-    H.friction circleShape $= 1.0
-    H.elasticity circleShape $= 0.9
-    H.spaceAddShape space circleShape
-    H.position circleBody $= H.Vector 200 20
-
-    (playerBody, playerFeetShape, playerBodyShape) <- makeCharacter space
-    (mummyBody, mummyFeetShape, mummyBodyShape) <- makeCharacter space
-    H.position playerBody $= H.Vector 240 100
-    H.collisionType playerFeetShape $= playerFeetCollisionType
-    H.position mummyBody $= H.Vector 110 200
+    levelLoaded <- initLevel testLevel
 
     let
         render :: MonadIO m => V2 CDouble -> [Renderable] -> m ()
@@ -392,6 +435,10 @@ main = do
                     (V2 renderTextureSize dispHeight)
             SDL.copy textureRenderer renderTexture (Just renderRect) Nothing
             SDL.present textureRenderer
+
+        space = levelSpace levelLoaded
+        (playerFeetShape, playerBodyShape) = playerPhysicsRefs levelLoaded
+    playerBody <- get $ H.shapeBody playerFeetShape
 
     runSpiderHost $ do
         (eSdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
@@ -564,7 +611,7 @@ main = do
                         when (hitShape /= nullPtr) $ do
                             hitBody <- get $ H.shapeBody hitShape
                             liftIO $ H.applyImpulse hitBody playerKickVec H.zero
-                            when (hitBody == mummyBody) $ liftIO $ putStrLn "Kicked mummy"
+                            -- when (hitBody == mummyBody) $ liftIO $ putStrLn "Kicked mummy"
 
                 tickInfo <- current <$> clock
                 let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
@@ -592,17 +639,17 @@ main = do
                     renderColDebug = do
                         mummyP <- mummyPos
                         playerP <- playerPos
-                        let renderShapes =
-                                [ Shape shelf shelfShapeType
-                                , Shape circleShape circleShapeType
-                                ]
-                                ++ (uncurry Shape <$> wallShapes)
+                        let aiRenderShapes =
+                                concatMap (\(feetShape, bodyShape) ->
+                                               [ Shape feetShape characterFeetShapeType
+                                               , Shape bodyShape characterBodyShapeType
+                                               ]) (aiPhysicsRefs levelLoaded)
+                            renderShapes =
+                                uncurry Shape <$> extraPhysicsRefs levelLoaded
                             renderCharacterColliders =
                                 [ Shape playerFeetShape characterFeetShapeType
-                                , Shape mummyFeetShape characterFeetShapeType
                                 , Shape playerBodyShape characterBodyShapeType
-                                , Shape mummyBodyShape characterBodyShapeType
-                                ]
+                                ] ++ aiRenderShapes
                             chrLine chrP (p1, p2) =
                                 Line (V4 255 0 0 255) (toV2 $ p1 + chrP) (toV2 $ p2 + chrP)
                             renderSideChecks =
@@ -700,8 +747,8 @@ main = do
                 currentPlayerForce <- hSample $ playerForce logicOutput
                 H.force playerBody $= currentPlayerForce
 
-                currentMummySurfaceVel <- hSample $ mummySurfaceVel logicOutput
-                H.surfaceVel mummyFeetShape $= currentMummySurfaceVel
+                --currentMummySurfaceVel <- hSample $ mummySurfaceVel logicOutput
+                --H.surfaceVel mummyFeetShape $= currentMummySurfaceVel
 
                 let spriterTimeStep = realToFrac $ dt * 1000
                 liftIO $ do
@@ -709,9 +756,9 @@ main = do
                     Spriter.setEntityInstanceTimeElapsed mummyEntityInstance spriterTimeStep
 
                 currentPlayerPos@(H.Vector (CDouble playerX) (CDouble playerY)) <- get $ H.position playerBody
-                currentMummyPos <- get $ H.position mummyBody
+                --currentMummyPos <- get $ H.position mummyBody
                 setPlayerPos currentPlayerPos
-                setMummyPos currentMummyPos
+                --setMummyPos currentMummyPos
 
                 renderables <- hSample $ renderCommands logicOutput
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
