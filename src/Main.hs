@@ -2,7 +2,6 @@
 module Main where
 
 import Control.Arrow ((***))
-import Control.Concurrent (forkIO, killThread)
 import qualified Control.Concurrent.Chan as Chan
 import Control.Lens ((^.))
 import Control.Monad (unless, replicateM_)
@@ -340,7 +339,7 @@ main = do
     H.spaceAddShape space mummyFeetShape
     H.spaceAddShape space mummyBodyShape
     H.friction mummyFeetShape $= characterFeetFriction
-    H.friction mummyBodyShape $= 0.5
+    H.friction mummyBodyShape $= 0
     H.position mummyBody $= H.Vector 110 200
     --H.collisionType mummyFeetShape $= playerFeetCollisionType
 
@@ -351,7 +350,7 @@ main = do
     H.spaceAddShape space playerFeetShape
     H.spaceAddShape space playerBodyShape
     H.friction playerFeetShape $= characterFeetFriction
-    H.friction playerBodyShape $= 0.5
+    H.friction playerBodyShape $= 0
     H.position playerBody $= H.Vector 240 100
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
@@ -635,19 +634,6 @@ main = do
         hQuit <- subscribeEvent $ quit logicOutput
         quitRef <- liftIO $ newIORef False
 
-        let eventChanTriggerThread = do
-                eventTriggers <- Chan.readChan eventChan
-                runSpiderHost $ forM_ eventTriggers $ \(EventTriggerRef triggerRef :=> TriggerInvocation value onComplete) -> do
-                    mTrigger <- liftIO $ readIORef triggerRef
-                    lmQuit <- case mTrigger of
-                        Nothing -> return []
-                        Just trigger ->
-                            fire [trigger :=> Identity value] $
-                                readEvent hQuit >>= sequence
-                    liftIO onComplete
-                    when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
-                eventChanTriggerThread
-
         playerArbiterCallback <- liftIO $ H.makeArbiterIterator
             (\_ arb -> do
                     (s1, s2) <- H.arbiterGetShapes arb
@@ -691,6 +677,17 @@ main = do
                         fire (fmap triggerSdlEvent events) $
                             readEvent hQuit >>= sequence
 
+                eventTriggers <- liftIO $ Chan.readChan eventChan
+                forM_ eventTriggers $ \(EventTriggerRef triggerRef :=> TriggerInvocation value onComplete) -> do
+                    mTrigger <- liftIO $ readIORef triggerRef
+                    lmQuit <- case mTrigger of
+                        Nothing -> return []
+                        Just trigger ->
+                            fire [trigger :=> Identity value] $
+                                readEvent hQuit >>= sequence
+                    liftIO onComplete
+                    when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
+
                 currentPlayerSurfaceVel <- hSample $ playerSurfaceVel logicOutput
                 H.surfaceVel playerFeetShape $= H.scale currentPlayerSurfaceVel (-1)
 
@@ -715,7 +712,8 @@ main = do
 
                 render (CDouble <$> V2 playerX playerY - camOffset) renderables
 
-                let shouldQuit = any isJust mQuit
+                delayedEventTriggeredExit <- liftIO $ readIORef quitRef
+                let shouldQuit = any isJust mQuit || delayedEventTriggeredExit
                 unless shouldQuit $
                     appLoop newTime $ timeAcc' - fromIntegral stepsToRun * timeStep
 
@@ -724,13 +722,9 @@ main = do
             Nothing -> return []
             Just eTrigger -> fire [eTrigger :=> Identity ()] $ return Nothing
 
-        eventTriggerId <- liftIO $ forkIO eventChanTriggerThread
-
         appLoop startTime 0.0
 
-        liftIO $ do
-            killThread eventTriggerId
-            freeHaskellFunPtr playerArbiterCallback
+        liftIO $ freeHaskellFunPtr playerArbiterCallback
 
     spriterImages <- readIORef loadedImages
     forM_ spriterImages $ \sprPtr -> do
