@@ -18,7 +18,7 @@ import Data.Word (Word8)
 import Foreign.C.Types (CInt, CUInt, CDouble(..))
 import Foreign.Ptr (Ptr, nullPtr)
 
-import Linear (V2(..), V4(..))
+import Linear (V2(..), V4(..), (*^))
 
 import qualified ChipmunkBindings as H
 import qualified ChipmunkTypes as H
@@ -29,6 +29,7 @@ import Reflex.Time
 import SDL (Point(P))
 import qualified SDL
 import qualified SDL.Raw.Types as SDL (JoystickID)
+import qualified SDL.Image
 
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
@@ -101,14 +102,12 @@ aiDirToDirection AiRight = Just DRight
 
 data Renderable
     = AnimatedSprite (Ptr Spriter.CEntityInstance) String (V2 CDouble) Direction
+    | StaticSprite SDL.Texture (V2 CDouble) CDouble
     | Line (V4 Word8) (V2 CDouble) (V2 CDouble)
     | Shape (Ptr H.Shape) H.ShapeType
 
 data LogicOutput t = LogicOutput
     { cameraCenterPosition :: Behavior t (V2 CDouble)
-    --playerSurfaceVel :: Behavior t H.Vector
-    --, mummySurfaceVel :: Behavior t H.Vector
-    --, playerForce :: Behavior t H.Vector
     , renderCommands :: Behavior t [Renderable]
     , quit :: Event t ()
     }
@@ -235,12 +234,6 @@ timeStep = 1/120
 spriterTimeStep :: Time.NominalDiffTime
 spriterTimeStep = 1/60
 
-data PhysicsOutput = PhysicsOutput
-    { physicsPlayerOnGround :: Bool
-    , physicsPlayerPosition :: H.Vector
-    , physicsAiPositions :: [H.Vector]
-    }
-
 class (MonadIO m, PerformEvent t m, TriggerEvent t m, MonadIO (Performable m), PostBuild t m, MonadHold t m, MonadFix m, MonadAdjust t m) => MonadGame t m
 
 instance (MonadGame
@@ -343,7 +336,7 @@ playerNetwork :: forall t m. MonadGame t m =>
     Maybe (Behavior t Double) ->
     Ptr H.Body ->
     Ptr Spriter.CEntityInstance ->
-    m (CharacterOutput t)
+    m (CharacterOutput t, Behavior t Bool)
 playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies mAxis body sprite = do
     let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
@@ -391,6 +384,7 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies mAxi
 
     let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
         dPressed = ($ SDL.ScancodeD) <$> pressedKeys
+        iPressed = ($ SDL.ScancodeI) <$> pressedKeys
         playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
         playerAxisMovement = CDouble <$> fromMaybe (pure 0) mAxis
         playerMovement = limit $ (+) <$> playerKeyMovement <*> playerAxisMovement
@@ -432,15 +426,25 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies mAxi
 
     let playerAnimation =
             pickAnimation <$> playerMoving <*> onGround <*> latestPlayerKick <*> timeSinceStart
-        playerForce = bool
-            <$> playerAirForce <*> pure (H.Vector 0 0) <*> onGround
+        horizontalForce = bool <$> playerAirForce <*> pure H.zero <*> onGround
+        jetpackOn = iPressed
+        verticalForce = bool H.zero (H.Vector 0 $ -6000) <$> jetpackOn
+        playerForce = horizontalForce + verticalForce
 
-    return CharacterOutput
-        { characterSurfaceVelocity = playerSurfaceVelocity
-        , characterForce = playerForce
-        , characterAnimation = playerAnimation
-        , characterDirection = playerDir
-        }
+    return ( CharacterOutput
+             { characterSurfaceVelocity = playerSurfaceVelocity
+             , characterForce = playerForce
+             , characterAnimation = playerAnimation
+             , characterDirection = playerDir
+             }
+           , jetpackOn
+           )
+
+data PhysicsOutput = PhysicsOutput
+    { physicsPlayerOnGround :: Bool
+    , physicsPlayerPosition :: H.Vector
+    , physicsAiPositions :: [H.Vector]
+    }
 
 samplePhysics :: Ptr H.Body -> [Ptr H.Body] -> IO PhysicsOutput
 samplePhysics playerBody characterBodies = do
@@ -458,15 +462,39 @@ samplePhysics playerBody characterBodies = do
         , physicsAiPositions = aiPositions
         }
 
+particleLifetime, particleSpawnInterval :: Time.NominalDiffTime
+particleLifetime = 1
+particleSpawnInterval = 0.05
+
+data Particle = Particle
+    { particleVelocity :: V2 CDouble
+    , particleAngularVel :: CDouble
+    , particleStartTime :: Time.UTCTime
+    , particleStartPos :: V2 CDouble
+    } deriving Show
+
+particleState :: Time.UTCTime -> Particle -> (V2 CDouble, CDouble)
+particleState time particle =
+    let livedTime = Time.diffUTCTime (particleStartTime particle) time
+    in ( particleStartPos particle + realToFrac livedTime *^ particleVelocity particle
+       , particleAngularVel particle * realToFrac livedTime
+       )
+
+particleAlive :: Time.UTCTime -> Particle -> Bool
+particleAlive time particle =
+    let livedTime = Time.diffUTCTime time (particleStartTime particle)
+    in livedTime < particleLifetime
+
 initLevelNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
+    SDL.Renderer ->
     EventSelector t SdlEventTag ->
     Event t Int ->
     Behavior t (SDL.Scancode -> Bool) ->
     Maybe (Behavior t Double) ->
     LevelLoadedData ->
     m (LogicOutput t)
-initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoaded = do
+initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mAxis levelLoaded = do
     let space = levelSpace levelLoaded
         (playerFeetShape, playerBodyShape) = playerPhysicsRefs levelLoaded
         aiShapesAndSprites = aiPhysicsRefs levelLoaded :: [(CharacterPhysicsRefs, Ptr Spriter.CEntityInstance)]
@@ -496,7 +524,7 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
             aiSurfaceVelocities = sequenceA $ characterSurfaceVelocity <$> aiCharacters
             aiPositions = physicsAiPositions <$> physicsOutput :: Behavior t [H.Vector]
 
-        player <-
+        (player, jetpackOn) <-
             playerNetwork
                 startTime
                 space
@@ -540,6 +568,30 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
         performEvent_ $ liftIO . Spriter.setEntityInstanceTimeElapsed aiEntityInstance
             . realToFrac . (*1000) <$> eSpriterDiffs
 
+    jetpackTex <- SDL.Image.loadTexture textureRenderer "res/jetpack.png"
+    liftIO $ putStrLn "Loaded: res/jetpack.png"
+    particleTex <- SDL.Image.loadTexture textureRenderer "res/jetpack particle.png"
+    liftIO $ putStrLn "Loaded: res/jetpack particle.png"
+
+    let clock = clockLossy (1/60) startTime
+
+    tickInfo <- current <$> clock
+    let time = _tickInfo_lastUTC <$> tickInfo
+
+    eSpawnParticleTick <- tickLossy particleSpawnInterval startTime
+    -- TODO: Add to player velocity
+    let eNewParticle = Particle (V2 0 $ -200) 3 <$> time <*> fmap toV2 playerPos <@ gate jetpackOn eSpawnParticleTick
+
+    rec
+        particles <- hold [] $ flip (:) <$> aliveParticles <@> eNewParticle
+        let aliveParticles = (filter . particleAlive) <$> time <*> particles
+
+    -- let particleLives = do
+    --         pars <- particles
+    --         t <- time
+    --         return $ map (\p -> Time.diffUTCTime t (particleStartTime p)) pars
+    -- performEvent_ $ (liftIO . print) <$> particleLives <@ eNewParticle
+
     let aiAnimations = do
             aiCurrentPositions <- aiPositions
             aiCurrentAnimations <- sequenceA $ characterAnimation <$> aiCharacters
@@ -579,7 +631,6 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
                     [ chrLine playerP playerKickCheckR
                     , chrLine playerP playerKickCheckL
                     ] ++ concatMap mummyLines currentAiPositions
-
             debugRender <- debugRendering
             dbgRenderChrs <- characterDbg
             dbgRenderCol <- colCheckDbg
@@ -590,8 +641,26 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
                 (True, False, True) -> return $ renderShapes ++ renderSideChecks
                 (True, True, True) -> return $ renderShapes ++ renderCharacterColliders ++ renderSideChecks
 
+        renderJetpack = do
+            pos <- playerPos
+            dir <- characterDirection player
+            let jetpackOffset = case dir of
+                    DLeft -> H.Vector 3 (-25)
+                    DRight -> H.Vector (-8) (-25)
+            return [ StaticSprite jetpackTex (toV2 $ pos + jetpackOffset) 0 ]
+
+        renderParticles = do
+            pars <- aliveParticles
+            currentTime <- time
+            forM (particleState currentTime <$> pars) $ \(pos, angle) ->
+                return $ StaticSprite particleTex pos angle
+
     return LogicOutput
         { cameraCenterPosition = toV2 . physicsPlayerPosition <$> physicsOutput
-        , renderCommands = renderCharacters <> renderColDebug
+        , renderCommands =
+                renderJetpack
+                <> renderParticles
+                <> renderCharacters
+                <> renderColDebug
         , quit = () <$ pressEvent SDL.KeycodeQ
         }

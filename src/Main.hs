@@ -171,12 +171,13 @@ mainReflex :: (MonadGame t m) =>
     FunPtr Spriter.ImageLoader ->
     FunPtr Spriter.Renderer ->
     Time.UTCTime ->
+    SDL.Renderer ->
     EventSelector t SdlEventTag ->
     Event t Int ->
     Behavior t (SDL.Scancode -> Bool) ->
     Maybe (Behavior t Double) ->
     m (LogicOutput t)
-mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mAxis = do
+mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mAxis = do
     eInit <- getPostBuild
 
     eLevelLoaded <- performEvent $ liftIO (initLevel imgloader renderf testLevel) <$ eInit
@@ -189,7 +190,7 @@ mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mAxi
 
     dGameMode <- holdGameMode
         (return initialOutput)
-        (initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis <$> eLevelLoaded)
+        (initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mAxis <$> eLevelLoaded)
 
     return LogicOutput
         { cameraCenterPosition = join $ current $ cameraCenterPosition <$> dGameMode
@@ -254,6 +255,15 @@ main = do
                             DLeft -> Spriter.setEntityInstanceScale entityInstance $ V2 (-1) 1
                         Spriter.setEntityInstancePosition entityInstance (position - camOffset)
                         Spriter.renderEntityInstance entityInstance
+                    StaticSprite texture pos angle -> do
+                        textureInfo <- SDL.queryTexture texture
+                        let px = SDL.textureWidth textureInfo `div` 2
+                            py = SDL.textureHeight textureInfo `div` 2
+                            center = SDL.P $ SDL.V2 px py
+                            V2 x y = pos - camOffset
+                            texSize = V2 (SDL.textureWidth textureInfo) (SDL.textureHeight textureInfo)
+                            renderRect = SDL.Rectangle (SDL.P $ V2 (floor x) (floor y)) texSize
+                        SDL.copyEx textureRenderer texture Nothing (Just renderRect) angle (Just center) (V2 False False)
                     Line color p1 p2 -> do
                         let (V2 x1 y1) = p1 - camOffset
                             (V2 x2 y2) = p2 - camOffset
@@ -292,10 +302,19 @@ main = do
             Just _ -> (Just *** Just) <$> mutableBehavior (0 :: Double)
 
         let sdlEventFan = fan eSdlEvent
+            mainReflexWithParameters = mainReflex
+                imgloader
+                renderf
+                startTime
+                textureRenderer
+                sdlEventFan
+                eStepPhysics
+                pressedKeys
+                mAxis
 
         eventChan <- liftIO Chan.newChan
         (logicOutput, FireCommand fire) <- hostPerformEventT $
-            runTriggerEventT (runPostBuildT (mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mAxis ) eStart) eventChan
+            runTriggerEventT (runPostBuildT mainReflexWithParameters eStart) eventChan
 
         hQuit <- subscribeEvent $ quit logicOutput
         quitRef <- liftIO $ newIORef False
