@@ -516,7 +516,7 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
             <> aiAnimations
 
         renderColDebug = do
-            --mummyP <- mummyPos
+            currentAiPositions <- aiPositions
             playerP <- playerPos
             let aiRenderShapes =
                     concatMap (\((feetShape, bodyShape), _) ->
@@ -532,14 +532,16 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
                 chrLine chrP (p1, p2) =
                     Line (V4 255 0 0 255) (toV2 $ p1 + chrP) (toV2 $ p2 + chrP)
                 renderSideChecks =
-                    [ --chrLine mummyP (mummySideCheckUL, mummySideCheckLL)
-                    -- , chrLine mummyP (mummySideCheckUR, mummySideCheckLR)
-                    -- , chrLine mummyP playerKickCheckR
-                    -- , chrLine mummyP playerKickCheckL
-                    --,
-                        chrLine playerP playerKickCheckR
+                    [ chrLine playerP playerKickCheckR
                     , chrLine playerP playerKickCheckL
                     ]
+                    ++ concatMap (\mummyP ->
+                                      [ chrLine mummyP (mummySideCheckUL, mummySideCheckLL)
+                                      , chrLine mummyP (mummySideCheckUR, mummySideCheckLR)
+                                      , chrLine mummyP playerKickCheckR
+                                      , chrLine mummyP playerKickCheckL
+                                      ]
+                                 ) currentAiPositions
 
             debugRender <- debugRendering
             dbgRenderChrs <- characterDbg
