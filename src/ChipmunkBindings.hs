@@ -2,10 +2,11 @@
 module ChipmunkBindings where
 
 import Control.Monad (replicateM)
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Monoid ((<>))
 import Data.StateVar (StateVar, makeStateVar)
 import Foreign.Marshal.Alloc (alloca, free, malloc)
-import Foreign.Ptr (Ptr, FunPtr)
+import Foreign.Ptr (Ptr, FunPtr, freeHaskellFunPtr)
 import Foreign.Storable (peek, poke)
 import qualified Language.C.Inline as C
 import System.IO.Unsafe (unsafePerformIO)
@@ -19,13 +20,15 @@ zero :: Vector
 zero = Vector 0 0
 
 noGroup :: CpGroup
+{-# NOINLINE noGroup #-}
 noGroup = unsafePerformIO [C.exp| unsigned int { CP_NO_GROUP } |]
 
 allCategories :: CpBitmask
+{-# NOINLINE allCategories #-}
 allCategories = unsafePerformIO [C.exp| unsigned int { CP_ALL_CATEGORIES } |]
 
 rotate :: Vector -> Vector -> Vector
-rotate vec1 vec2 = unsafePerformIO $ rot
+rotate vec1 vec2 = unsafePerformIO rot
     where
         rot = do
             [v1, v2, v3] <- replicateM 3 malloc
@@ -189,6 +192,17 @@ angle body = makeStateVar getter setter
 bodyEachArbiter :: Ptr Body -> FunPtr BodyArbiterIteratorFun -> IO ()
 bodyEachArbiter body func = [C.exp| void { cpBodyEachArbiter($(cpBody* body),
                                                              $(void (*func)(cpBody*, cpArbiter*, void*)), NULL) } |]
+
+bodyEachArbiterList :: Ptr Body -> IO [Ptr Arbiter]
+bodyEachArbiterList body = do
+    arbiterRef <- newIORef []
+    arbiterCallback <- makeArbiterIterator (\_ arb -> modifyIORef' arbiterRef (arb:))
+    bodyEachArbiter body arbiterCallback
+    arbiters <- readIORef arbiterRef
+    freeHaskellFunPtr arbiterCallback
+    return arbiters
+
+
 
 spaceGetStaticBody :: Ptr Space -> IO (Ptr Body)
 spaceGetStaticBody space = [C.exp| cpBody* { cpSpaceGetStaticBody($(cpSpace* space)) } |]

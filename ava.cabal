@@ -20,6 +20,7 @@ executable ava
                      , SpriterTypes
                      , ChipmunkBindings
                      , ChipmunkTypes
+                     , Game
                      , Reflex.Time
   default-language:    Haskell2010
   extra-libraries:     spriterengine chipmunk pthread stdc++

@@ -1,33 +1,29 @@
-{-# LANGUAGE OverloadedStrings, RecursiveDo, ScopedTypeVariables, FlexibleContexts, GADTs, TemplateHaskell #-}
+{-# LANGUAGE OverloadedStrings, ScopedTypeVariables, FlexibleContexts, GADTs #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
 module Main where
 
 import Control.Arrow ((***))
 import qualified Control.Concurrent.Chan as Chan
 import Control.Lens ((^.))
-import Control.Monad (unless, replicateM_)
+import Control.Monad (unless)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Ref (Ref, MonadRef)
 
-import Data.Bool (bool)
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Sum ((==>), DSum(..))
 import Data.Fixed (div')
-import Data.GADT.Compare.TH
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Maybe (isJust, fromMaybe)
-import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Storable as V
-import Data.Word (Word8)
 
 import Foreign.C.String (CString, withCString, peekCString)
-import Foreign.C.Types (CInt, CUInt, CFloat(..), CDouble(..))
-import Foreign.Marshal.Alloc (free)
-import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr, nullPtr)
+import Foreign.C.Types (CInt, CFloat(..), CDouble(..))
+import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr, FunPtr)
 import Foreign.StablePtr
     ( newStablePtr
     , deRefStablePtr
@@ -43,6 +39,7 @@ import Linear (V2(..), V4(..))
 
 import qualified ChipmunkBindings as H
 import qualified ChipmunkTypes as H
+import Game
 
 import Reflex
 import Reflex.Host.Class
@@ -53,46 +50,14 @@ import Reflex.Host.Class
     , readEvent
     , MonadReflexHost
     )
-import Reflex.Time
 
 import SDL (Point(P))
 import qualified SDL
-import qualified SDL.Raw.Types as SDL (JoystickID)
 import qualified SDL.Image
 import qualified SDL.Primitive as SDL
 
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
-
-timeStep :: Time.NominalDiffTime
-timeStep = 1/120
-
-shelfStart, shelfEnd :: Num a => (a, a)
-shelfStart = (100, 200)
-shelfEnd = (300, 320)
-
-padButtonX, padButtonA :: Word8
-padButtonA = 0
-padButtonX = 2
-
-padXAxis :: Word8
-padXAxis = 0
-
-makeHVector :: (CDouble, CDouble) -> H.Vector
-makeHVector = uncurry H.Vector
-
-makeSdlPoint :: Num a => (a, a) -> SDL.Point V2 a
-makeSdlPoint = SDL.P . uncurry SDL.V2
-
-startV, endV :: H.Vector
-(startV, endV) = (makeHVector shelfStart, makeHVector shelfEnd)
-
-startP, endP :: SDL.Point V2 CInt
-(startP, endP) = (makeSdlPoint shelfStart, makeSdlPoint shelfEnd)
-
-circleMass, circleRadius :: Num a => a
-circleMass = 10
-circleRadius = 20
 
 cameraOffset :: MonadIO m => SDL.Window -> SDL.Renderer -> m (V2 Double)
 cameraOffset window textureRenderer = do
@@ -102,72 +67,15 @@ cameraOffset window textureRenderer = do
         (fromIntegral ww / 2 / float2Double rsx)
         (fromIntegral wh / 2 / float2Double rsy)
 
-isPress :: SDL.KeyboardEventData -> Bool
-isPress event =
-    SDL.keyboardEventKeyMotion event == SDL.Pressed
-
-isRelease :: SDL.KeyboardEventData -> Bool
-isRelease event =
-    SDL.keyboardEventKeyMotion event == SDL.Released
-
-eventKeycode :: SDL.KeyboardEventData -> SDL.Keycode
-eventKeycode = SDL.keysymKeycode . SDL.keyboardEventKeysym
-
-isKey :: SDL.Keycode -> SDL.KeyboardEventData -> Bool
-isKey keycode = (== keycode) . eventKeycode
-
-isKeyPressed :: SDL.Keycode -> SDL.Event -> Bool
-isKeyPressed key event =
-    case SDL.eventPayload event of
-        SDL.KeyboardEvent eventData ->
-            isPress eventData && isKey key eventData
-        _ ->
-            False
-
-playerSpeed :: CDouble
-playerSpeed = 200
-
-controlVx :: Num a => a -> Bool -> Bool -> a
-controlVx x True False = -x
-controlVx x False True = x
-controlVx _ _ _ = 0
-
 frameTime :: Double
 frameTime = 0.05
 
 playerFrames :: Int
 playerFrames = 10
 
-playerFeetCollisionType :: CUInt
-playerFeetCollisionType = 1
-
-data SdlEventTag a where
-    ControllerDeviceEvent :: SdlEventTag SDL.ControllerDeviceEventData
-    JoyAxisEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyAxisEventData
-    JoyButtonEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyButtonEventData
-    KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
-    OtherEvent :: SdlEventTag SDL.Event
-
-deriveGEq ''SdlEventTag
-deriveGCompare ''SdlEventTag
-
 newtype RenderState = RenderState
     { cameraPosition :: V2 Double
     }
-
-data Direction = DLeft | DRight deriving (Eq, Show)
-
-data AiDir = AiLeft | AiStay | AiRight deriving (Eq, Show)
-
-data Renderable
-    = AnimatedSprite (Ptr Spriter.CEntityInstance) String (V2 CDouble) Direction
-    | Line (V4 Word8) (V2 CDouble) (V2 CDouble)
-    | Shape (Ptr H.Shape) H.ShapeType
-
-aiDirToDirection :: AiDir -> Maybe Direction
-aiDirToDirection AiStay = Nothing
-aiDirToDirection AiLeft = Just DLeft
-aiDirToDirection AiRight = Just DRight
 
 sortEvent :: SDL.Event -> DMap SdlEventTag Identity
 sortEvent event =
@@ -184,101 +92,6 @@ sortEvent event =
             OtherEvent ==> event
     where wrapInDMap x = DMap.fromList [x]
 
-data LogicOutput t = LogicOutput
-    { playerSurfaceVel :: Behavior t H.Vector
-    , mummySurfaceVel :: Behavior t H.Vector
-    , playerForce :: Behavior t H.Vector
-    , renderCommands :: Behavior t [Renderable]
-    , quit :: Event t ()
-    }
-
-data EnemyType = Mummy
-
-data ObjectType = Ball
-
-data LevelData = LevelData
-    { playerStartPosition :: H.Vector
-    , wallEdges :: [(H.Vector, H.Vector)]
-    , initEnemies :: [(EnemyType, H.Vector)]
-    , extraObjects :: [(ObjectType, H.Vector)]
-    }
-
-type CharacterPhysicsRefs = (Ptr H.Shape, Ptr H.Shape)
-
-data LevelPhysicsRefs = LevelPhysicsRefs
-    { playerPhysicsRefs :: CharacterPhysicsRefs
-    , aiPhysicsRefs :: [CharacterPhysicsRefs]
-    , extraPhysicsRefs :: [(Ptr H.Shape, H.ShapeType)]
-    , levelSpace :: Ptr H.Space
-    }
-
-testLevel :: LevelData
-testLevel =
-    let tl = H.Vector 0 0
-        bl = H.Vector 0 400
-        tr = H.Vector 400 0
-        br = H.Vector 400 400
-
-        corners = [tl, H.Vector (-200) (-10), H.Vector (-200) 360, bl, H.Vector 150 380, br, tr]
-        edges = zip corners $ tail corners ++ [head corners]
-    in LevelData
-       { wallEdges = edges
-       , playerStartPosition = H.Vector 240 100
-       , initEnemies = [(Mummy, H.Vector 110 200)]
-       , extraObjects = [(Ball, H.Vector 200 20)]
-       }
-
-
-initLevel :: LevelData -> IO LevelPhysicsRefs
-initLevel levelData = do
-    putStrLn "Creating chipmunk space"
-    space <- H.newSpace
-    H.gravity space $= H.Vector 0 400
-
-    wall <- H.spaceGetStaticBody space
-
-    let shelfShapeType = H.LineSegment startV endV 1
-    shelf <- H.newShape wall shelfShapeType
-    H.friction shelf $= 1.0
-    H.elasticity shelf $= 0.6
-    H.spaceAddShape space shelf
-
-    wallShapes <- forM (wallEdges levelData) $ \(start, end) -> do
-        let wst = H.LineSegment start end 1
-        w <- H.newShape wall wst
-        H.friction w $= 1.0
-        H.elasticity w $= 0.6
-        H.spaceAddShape space w
-        return (w, wst)
-
-    let circleMoment = H.momentForCircle circleMass (0, circleRadius) (H.Vector 0 0)
-
-    circleBody <- H.newBody circleMass circleMoment
-    H.spaceAddBody space circleBody
-
-    let circleShapeType = H.Circle circleRadius H.zero
-    circleShape <- H.newShape circleBody circleShapeType
-    H.friction circleShape $= 1.0
-    H.elasticity circleShape $= 0.9
-    H.spaceAddShape space circleShape
-    H.position circleBody $= H.Vector 200 20
-
-    playerRefs@(playerFeetShape, _) <- makeCharacter space
-    playerBody <- get $ H.shapeBody playerFeetShape
-    mummyRefs@(mummyFeetShape, _) <- makeCharacter space
-    mummyBody <- get $ H.shapeBody mummyFeetShape
-
-    H.position playerBody $= playerStartPosition levelData
-    H.collisionType playerFeetShape $= playerFeetCollisionType
-    H.position mummyBody $= H.Vector 110 200
-
-    return LevelPhysicsRefs
-        { playerPhysicsRefs = playerRefs
-        , aiPhysicsRefs = [ mummyRefs ]
-        , extraPhysicsRefs = wallShapes ++ [(circleShape, circleShapeType), (shelf, shelfShapeType)]
-        , levelSpace = space
-        }
-
 renderTextureSize :: Num a => a
 renderTextureSize = 512
 
@@ -289,64 +102,100 @@ mutableBehavior startValue = do
     value <- runHostFrame $ hold startValue eUpdateValue
     return (value, fireEventRef eUpdateValueTriggerRef)
 
-limit :: (Num a, Ord a, Reflex t) => Behavior t a -> Behavior t a
-limit = fmap limf where
-    limf x
-        | x < -1 = -1
-        | x > 1 = 1
-        | otherwise = x
+initLevel :: FunPtr Spriter.ImageLoader -> FunPtr Spriter.Renderer -> LevelData -> IO LevelLoadedData
+initLevel imgloader renderf levelData = do
+    putStrLn "Creating chipmunk space"
+    space <- H.newSpace
+    H.gravity space $= H.Vector 0 400
 
-makeCharacterBody :: H.CpFloat -> H.CpFloat -> [H.Vector]
-makeCharacterBody w h =
-    [ H.Vector (-w * 0.5) (-h * 0.2)
-    , H.Vector (-w * 0.5) (-h * 0.8)
-    , H.Vector (-w * 0.3) (-h)
-    , H.Vector (w * 0.3) (-h)
-    , H.Vector (w * 0.5) (-h * 0.8)
-    , H.Vector (w * 0.5) (-h * 0.2)
-    , H.Vector (w * 0.3) (-h * 0.1)
-    , H.Vector (-w * 0.3) (-h * 0.1)
-    ]
+    playerSpriterModel <- withCString "res/princess/Princess.scon"
+        (Spriter.loadSpriterModel imgloader renderf)
+    playerEntityInstance <- withCString "Princess" $ Spriter.modelGetNewEntityInstance playerSpriterModel
+    withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation playerEntityInstance
 
-characterWidth, characterHeight, characterMass, characterFeetFriction, characterSide :: H.CpFloat
-characterWidth = 10
-characterHeight = 30
-characterMass = 5
-characterFeetFriction = 2
-characterSide = characterWidth * 0.7
+    mummySpriterModel <- withCString "res/mummy/Mummy.scon"
+        (Spriter.loadSpriterModel imgloader renderf)
+    wall <- H.spaceGetStaticBody space
 
-characterFeetShapeType, characterBodyShapeType :: H.ShapeType
-characterFeetShapeType = H.Circle (characterWidth * 0.3) (H.Vector 0 $ - characterWidth * 0.2)
-characterBodyShapeType = H.Polygon (V.fromList $ reverse $ makeCharacterBody characterWidth characterHeight) 0
+    wallShapes <- forM (wallEdges levelData) $ \(start, end) -> do
+        let wst = H.LineSegment start end 1
+        w <- H.newShape wall wst
+        H.friction w $= 1.0
+        H.elasticity w $= 0.6
+        H.spaceAddShape space w
+        return (w, wst)
 
-playerKickCheckR, playerKickCheckL :: (H.Vector, H.Vector)
-playerKickCheckR =
-    ( H.Vector characterSide (-17)
-    , H.Vector (2.2 * characterSide) (-17)
-    )
-playerKickCheckL =
-    ( H.Vector (- characterSide) (-17)
-    , H.Vector (- 2.2 * characterSide) (-17)
-    )
+    extraObjectRefs <- forM (extraObjects levelData) $ \(objectType, initPosition) ->
+        case objectType of
+            Ball -> do
+                let circleMoment = H.momentForCircle circleMass (0, circleRadius) (H.Vector 0 0)
+                    circleShapeType = H.Circle circleRadius H.zero
 
-mummySideCheckUR, mummySideCheckLR, mummySideCheckUL, mummySideCheckLL :: H.Vector
-mummySideCheckUR = H.Vector characterSide (-10)
-mummySideCheckLR = H.Vector characterSide 10
-mummySideCheckUL = H.Vector (-characterSide) (-10)
-mummySideCheckLL = H.Vector (-characterSide) 10
+                circleBody <- H.newBody circleMass circleMoment
+                H.spaceAddBody space circleBody
 
-makeCharacter :: Ptr H.Space -> IO CharacterPhysicsRefs
-makeCharacter space = do
-    characterBody <- H.newBody characterMass $ 1/0
-    H.spaceAddBody space characterBody
-    characterFeetShape <- H.newShape characterBody characterFeetShapeType
-    characterBodyShape <- H.newShape characterBody characterBodyShapeType
-    H.spaceAddShape space characterFeetShape
-    H.spaceAddShape space characterBodyShape
-    H.friction characterFeetShape $= characterFeetFriction
-    H.friction characterBodyShape $= 0
+                circleShape <- H.newShape circleBody circleShapeType
+                H.friction circleShape $= 1.0
+                H.elasticity circleShape $= 0.9
+                H.spaceAddShape space circleShape
+                H.position circleBody $= initPosition
+                return (circleShape, circleShapeType)
 
-    return (characterFeetShape, characterBodyShape)
+    playerRefs@(playerFeetShape, _) <- makeCharacter space
+    playerBody <- get $ H.shapeBody playerFeetShape
+
+    aiRefs <- forM (initEnemies levelData) $ \(enemyType, initPosition) ->
+        case enemyType of
+            Mummy -> do
+                mummyRefs@(mummyFeetShape, _) <- makeCharacter space
+                mummyBody <- get $ H.shapeBody mummyFeetShape
+                H.position mummyBody $= initPosition
+
+                mummyEntityInstance <- withCString "Mummy" $ Spriter.modelGetNewEntityInstance mummySpriterModel
+                withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation mummyEntityInstance
+
+                return (mummyRefs, mummyEntityInstance)
+
+    H.position playerBody $= playerStartPosition levelData
+    H.collisionType playerFeetShape $= playerFeetCollisionType
+
+    return LevelLoadedData
+        { playerPhysicsRefs = playerRefs
+        , playerSpriterInstance = playerEntityInstance
+        , aiPhysicsRefs = aiRefs
+        , extraPhysicsRefs = wallShapes ++ extraObjectRefs
+        , levelSpace = space
+        }
+
+mainReflex :: (MonadGame t m) =>
+    FunPtr Spriter.ImageLoader ->
+    FunPtr Spriter.Renderer ->
+    Time.UTCTime ->
+    EventSelector t SdlEventTag ->
+    Event t Int ->
+    Behavior t (SDL.Scancode -> Bool) ->
+    Maybe (Behavior t Double) ->
+    m (LogicOutput t)
+mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mAxis = do
+    eInit <- getPostBuild
+
+    eLevelLoaded <- performEvent $ liftIO (initLevel imgloader renderf testLevel) <$ eInit
+
+    let initialOutput = LogicOutput
+            { cameraCenterPosition = pure $ V2 0 0
+            , renderCommands = pure []
+            , quit = never
+            }
+
+    dGameMode <- holdGameMode
+        (return initialOutput)
+        (initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis <$> eLevelLoaded)
+
+    return LogicOutput
+        { cameraCenterPosition = join $ current $ cameraCenterPosition <$> dGameMode
+        , renderCommands = join $ current $ renderCommands <$> dGameMode
+        , quit = switchPromptlyDyn $ quit <$> dGameMode
+        }
 
 main :: IO ()
 main = do
@@ -389,18 +238,6 @@ main = do
 
     Spriter.setErrorFunction
 
-    playerSpriterModel <- withCString "res/princess/Princess.scon"
-        (Spriter.loadSpriterModel imgloader renderf)
-    playerEntityInstance <- withCString "Princess" $ Spriter.modelGetNewEntityInstance playerSpriterModel
-    withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation playerEntityInstance
-
-    mummySpriterModel <- withCString "res/mummy/Mummy.scon"
-        (Spriter.loadSpriterModel imgloader renderf)
-    mummyEntityInstance <- withCString "Mummy" $ Spriter.modelGetNewEntityInstance mummySpriterModel
-    withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation mummyEntityInstance
-
-    levelLoaded <- initLevel testLevel
-
     let
         render :: MonadIO m => V2 CDouble -> [Renderable] -> m ()
         render camOffset renderables = do
@@ -436,22 +273,14 @@ main = do
             SDL.copy textureRenderer renderTexture (Just renderRect) Nothing
             SDL.present textureRenderer
 
-        space = levelSpace levelLoaded
-        (playerFeetShape, playerBodyShape) = playerPhysicsRefs levelLoaded
-    playerBody <- get $ H.shapeBody playerFeetShape
-
     runSpiderHost $ do
         (eSdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
         (eStart, startTriggerRef) <- newEventWithTriggerRef
+        (eStepPhysics, stepPhysicsRef) <- newEventWithTriggerRef
 
         startTime <- liftIO Time.getCurrentTime
 
-        (playerOnGround, setPlayerOnGround) <- mutableBehavior False
         (pressedKeys, setPressedKeys) <- mutableBehavior =<< SDL.getKeyboardState
-        (mummyPos, setMummyPos) <- mutableBehavior H.zero
-        (playerPos, setPlayerPos) <- mutableBehavior H.zero
-
-        playerOnGroundRef <- liftIO $ newIORef False
 
         joysticks <- SDL.availableJoysticks
         mGamepad <- if null joysticks
@@ -462,238 +291,14 @@ main = do
             Nothing -> return (Nothing, Nothing)
             Just _ -> (Just *** Just) <$> mutableBehavior (0 :: Double)
 
-        let groundCheckFilter = H.ShapeFilter
-                { H.shapeFilterGroup = H.noGroup
-                , H.shapeFilterCategories = H.allCategories
-                , H.shapeFilterMask = H.allCategories
-                }
-
-            sdlEventFan = fan eSdlEvent
-
-            mainReflex :: PostBuildT
-                (SpiderTimeline Global)
-                (TriggerEventT
-                    (SpiderTimeline Global)
-                    (PerformEventT (SpiderTimeline Global) (SpiderHost Global)))
-                (LogicOutput (SpiderTimeline Global))
-            mainReflex = do
-                eInit <- getPostBuild
-
-                let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
-                    eWPressed = pressEvent SDL.KeycodeW
-                    eKPressed = pressEvent SDL.KeycodeK
-                    eF1Pressed = pressEvent SDL.KeycodeF1
-                    eF2Pressed = pressEvent SDL.KeycodeF2
-                    eF3Pressed = pressEvent SDL.KeycodeF3
-                    eAPressed = pressEvent SDL.KeycodeA
-                    eDPressed = pressEvent SDL.KeycodeD
-                    padButtonPress = select sdlEventFan (JoyButtonEvent 0)
-                    padAxisMove = select sdlEventFan (JoyAxisEvent 0)
-                    padFilterButtonPress b = ffilter
-                        (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) padButtonPress
-                    ePadAPressed = padFilterButtonPress padButtonA
-                    ePadXPressed = padFilterButtonPress padButtonX
-                    ePadNotCenter = ffilter
-                        (\(SDL.JoyAxisEventData _ a v) ->
-                             a == padXAxis &&
-                             abs (fromIntegral v / 32768 :: Float) > 0.15)
-                        padAxisMove
-                    ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
-                        <$> ePadNotCenter
-
-                    rightSideSegment pos =
-                        ( pos + mummySideCheckUR
-                        , pos + mummySideCheckLR
-                        )
-                    leftSideSegment pos =
-                        ( pos + mummySideCheckUL
-                        , pos + mummySideCheckLL
-                        )
-
-                aiTick <- tickLossy (1/15) startTime
-                let queryLineSeg :: MonadIO m => (H.Vector, H.Vector) -> m H.SegmentQueryInfo
-                    queryLineSeg (s, e) = liftIO $ H.spaceSegmentQueryFirst space s e 1 groundCheckFilter
-
-                debugRendering <- current <$> toggle True eF1Pressed
-                characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
-                colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
-                playerDir <- hold DRight $ leftmost
-                    [ DLeft <$ eAPressed
-                    , DRight <$ eDPressed
-                    , ePadChangeDir
-                    ]
-
-                let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
-                    dPressed = ($ SDL.ScancodeD) <$> pressedKeys
-                    playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
-                    playerAxisMovement = CDouble <$> fromMaybe (pure 0) mAxis
-                    playerMovement = limit $ (+) <$> playerKeyMovement <*> playerAxisMovement
-                    playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
-                    playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
-                    ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
-                    ePlayerWantsToKick = mconcat [() <$ eKPressed, () <$ ePadXPressed]
-                    ePlayerKick = ePlayerWantsToKick -- TODO: Add check for current player state
-
-                    jumpEvent = (-1000) <$ gate playerOnGround ePlayerWantsToJump
-
-                    mummySpeed AiRight = H.Vector (- playerSpeed / 6) 0
-                    mummySpeed AiLeft = H.Vector (playerSpeed / 6) 0
-                    mummySpeed AiStay = H.zero
-
-                    playerSurfaceVelocity = bool
-                        <$> pure (H.Vector 0 0) <*> playerAcc <*> playerOnGround
-                    playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
-
-                    jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) H.zero
-
-                    doAiCollisionChecks mp = liftIO $ do
-                        let (pkc1r, pkc2r) = playerKickCheckR
-                            (pkc1l, pkc2l) = playerKickCheckL
-                            segsToCheck =
-                                [ rightSideSegment mp
-                                , leftSideSegment mp
-                                , (pkc1r + mp, pkc2r + mp)
-                                , (pkc1l + mp, pkc2l + mp)
-                                ]
-
-                        [cgr, cgl, cwr, cwl] <- forM segsToCheck $ \seg -> do
-                            segHitInfo <- queryLineSeg seg
-                            return $ H.segQueryInfoShape segHitInfo /= nullPtr
-                        return (cgr, cgl, cwr, cwl)
-
-                    runAiLogic (colGroundRight, colGroundLeft, colWallRight, colWallLeft) currentDir =
-                        let canGoLeft = colGroundLeft && not colWallLeft
-                            canGoRight = colGroundRight && not colWallRight
-                        in case currentDir of
-                            AiLeft
-                                | canGoLeft -> Nothing
-                                | canGoRight -> Just AiRight
-                                | otherwise -> Just AiStay
-                            AiRight
-                                | canGoRight -> Nothing
-                                | canGoLeft -> Just AiLeft
-                                | otherwise -> Just AiStay
-                            AiStay
-                                | canGoRight -> Just AiRight
-                                | canGoLeft -> Just AiLeft
-                                | otherwise -> Nothing
-
-                colResults <- performEvent $ doAiCollisionChecks <$> mummyPos <@ aiTick
-
-                mummyWalkDirection <- foldDynMaybe runAiLogic AiStay colResults
-                mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection $ updated mummyWalkDirection
-
-                let mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection
-                    mummyMoving = (\(H.Vector vx _) -> abs vx > 0) <$> mummySurfaceVelocity
-                    kickDuration = 0.6
-                    kickDelay = 0.4
-                    pickAnimation moving onGround lastKickTime currentTime =
-                        let runOrIdle
-                                | not onGround = "Falling"
-                                | moving = "Run"
-                                | otherwise = "Idle"
-                        in case lastKickTime of
-                            Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
-                            Nothing -> runOrIdle
-                    clock = clockLossy (1/60) startTime
-                    playerKickEffect :: MonadIO m => H.Vector -> Direction -> m ()
-                    playerKickEffect playerP playerD = do
-                        let (pkc1, pkc2) = case playerD of
-                                DRight -> playerKickCheckR
-                                DLeft -> playerKickCheckL
-                            playerKickVec = case playerD of
-                                DRight -> H.Vector 1000 (-1000)
-                                DLeft -> H.Vector (-1000) (-1000)
-
-                        hitShapeInfo <- queryLineSeg (playerP + pkc1, playerP + pkc2)
-
-                        let hitShape = H.segQueryInfoShape hitShapeInfo
-                        when (hitShape /= nullPtr) $ do
-                            hitBody <- get $ H.shapeBody hitShape
-                            liftIO $ H.applyImpulse hitBody playerKickVec H.zero
-                            -- when (hitBody == mummyBody) $ liftIO $ putStrLn "Kicked mummy"
-
-                tickInfo <- current <$> clock
-                let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
-
-                latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerKick
-                eDelayedPlayerKick <- delay kickDelay ePlayerKick
-
-                performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime playerEntityInstance 0) <$ ePlayerKick
-                performEvent_ $ playerKickEffect <$> playerPos <*> playerDir <@ eDelayedPlayerKick
-
-                performEvent_ $ jump <$> jumpEvent
-
-                let playerAnimation =
-                        pickAnimation <$> playerMoving <*> playerOnGround <*> latestPlayerKick <*> timeSinceStart
-                    mummyAnimation = (\moving -> if moving then "Walk" else "Idle") <$> mummyMoving
-                    toV2 (H.Vector x y) = V2 x y
-
-                let renderCharacters = sequenceA
-                        [ AnimatedSprite playerEntityInstance
-                            <$> playerAnimation <*> fmap toV2 playerPos <*> playerDir
-                        , AnimatedSprite mummyEntityInstance
-                            <$> mummyAnimation <*> fmap toV2 mummyPos <*> mummyDisplayDir
-                        ]
-
-                    renderColDebug = do
-                        mummyP <- mummyPos
-                        playerP <- playerPos
-                        let aiRenderShapes =
-                                concatMap (\(feetShape, bodyShape) ->
-                                               [ Shape feetShape characterFeetShapeType
-                                               , Shape bodyShape characterBodyShapeType
-                                               ]) (aiPhysicsRefs levelLoaded)
-                            renderShapes =
-                                uncurry Shape <$> extraPhysicsRefs levelLoaded
-                            renderCharacterColliders =
-                                [ Shape playerFeetShape characterFeetShapeType
-                                , Shape playerBodyShape characterBodyShapeType
-                                ] ++ aiRenderShapes
-                            chrLine chrP (p1, p2) =
-                                Line (V4 255 0 0 255) (toV2 $ p1 + chrP) (toV2 $ p2 + chrP)
-                            renderSideChecks =
-                                [ chrLine mummyP (mummySideCheckUL, mummySideCheckLL)
-                                , chrLine mummyP (mummySideCheckUR, mummySideCheckLR)
-                                , chrLine mummyP playerKickCheckR
-                                , chrLine mummyP playerKickCheckL
-                                , chrLine playerP playerKickCheckR
-                                , chrLine playerP playerKickCheckL
-                                ]
-
-                        debugRender <- debugRendering
-                        dbgRenderChrs <- characterDbg
-                        dbgRenderCol <- colCheckDbg
-                        case (debugRender, dbgRenderChrs, dbgRenderCol) of
-                            (False, _, _) -> return []
-                            (True, False, False) -> return renderShapes
-                            (True, True, False) -> return $ renderShapes ++ renderCharacterColliders
-                            (True, False, True) -> return $ renderShapes ++ renderSideChecks
-                            (True, True, True) -> return $ renderShapes ++ renderCharacterColliders ++ renderSideChecks
-
-                return LogicOutput
-                    { playerSurfaceVel = playerSurfaceVelocity
-                    , mummySurfaceVel = mummySurfaceVelocity
-                    , playerForce = bool
-                        <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround
-                    , renderCommands = renderCharacters <> renderColDebug
-                    , quit = () <$ pressEvent SDL.KeycodeQ
-                    }
+        let sdlEventFan = fan eSdlEvent
 
         eventChan <- liftIO Chan.newChan
         (logicOutput, FireCommand fire) <- hostPerformEventT $
-            runTriggerEventT (runPostBuildT mainReflex eStart) eventChan
+            runTriggerEventT (runPostBuildT (mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mAxis ) eStart) eventChan
 
         hQuit <- subscribeEvent $ quit logicOutput
         quitRef <- liftIO $ newIORef False
-
-        playerArbiterCallback <- liftIO $ H.makeArbiterIterator
-            (\_ arb -> do
-                    (s1, s2) <- H.arbiterGetShapes arb
-                    ct1 <- get $ H.collisionType s1
-                    ct2 <- get $ H.collisionType s2
-                    when (ct1 == playerFeetCollisionType && ct2 == 0) $ writeIORef playerOnGroundRef True
-                    return ())
 
         let hSample = runHostFrame . sample
 
@@ -704,13 +309,13 @@ main = do
                     timeAcc' = timeAcc + dt
                     stepsToRun = timeAcc' `div'` timeStep
 
-                liftIO $ replicateM_ stepsToRun $ H.step space $ realToFrac timeStep
-
-                onGround <- liftIO $ do
-                    writeIORef playerOnGroundRef False
-                    H.bodyEachArbiter playerBody playerArbiterCallback
-                    readIORef playerOnGroundRef
-                setPlayerOnGround onGround
+                mPhysicsTrigger <- liftIO $ readIORef stepPhysicsRef
+                case mPhysicsTrigger of
+                    Nothing -> return ()
+                    Just physicsTrigger -> do
+                        lmQuit <- fire [ physicsTrigger ==> stepsToRun ] $
+                            readEvent hQuit >>= sequence
+                        when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
 
                 setPressedKeys =<< SDL.getKeyboardState
 
@@ -722,13 +327,14 @@ main = do
                         <$> SDL.axisPosition gamepad 0
 
                 mSdlTrigger <- liftIO $ readIORef sdlTriggerRef
-                mQuit <- case mSdlTrigger of
-                    Nothing -> return []
+                case mSdlTrigger of
+                    Nothing -> return ()
                     Just sdlTrigger -> do
                         events <- SDL.pollEvents
                         let triggerSdlEvent evt = sdlTrigger :=> Identity (sortEvent evt)
-                        fire (fmap triggerSdlEvent events) $
+                        lmQuit <- fire (fmap triggerSdlEvent events) $
                             readEvent hQuit >>= sequence
+                        when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
 
                 eventTriggers <- liftIO $ Chan.readChan eventChan
                 forM_ eventTriggers $ \(EventTriggerRef triggerRef :=> TriggerInvocation value onComplete) -> do
@@ -741,32 +347,30 @@ main = do
                     liftIO onComplete
                     when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
 
-                currentPlayerSurfaceVel <- hSample $ playerSurfaceVel logicOutput
-                H.surfaceVel playerFeetShape $= H.scale currentPlayerSurfaceVel (-1)
-
-                currentPlayerForce <- hSample $ playerForce logicOutput
-                H.force playerBody $= currentPlayerForce
-
                 --currentMummySurfaceVel <- hSample $ mummySurfaceVel logicOutput
                 --H.surfaceVel mummyFeetShape $= currentMummySurfaceVel
 
-                let spriterTimeStep = realToFrac $ dt * 1000
-                liftIO $ do
-                    Spriter.setEntityInstanceTimeElapsed playerEntityInstance spriterTimeStep
-                    Spriter.setEntityInstanceTimeElapsed mummyEntityInstance spriterTimeStep
+                -- let spriterTimeStep = realToFrac $ dt * 1000
+                -- liftIO $ do
+                --     Spriter.setEntityInstanceTimeElapsed playerEntityInstance spriterTimeStep
+                --     Spriter.setEntityInstanceTimeElapsed mummyEntityInstance spriterTimeStep
 
-                currentPlayerPos@(H.Vector (CDouble playerX) (CDouble playerY)) <- get $ H.position playerBody
                 --currentMummyPos <- get $ H.position mummyBody
-                setPlayerPos currentPlayerPos
                 --setMummyPos currentMummyPos
+                -- liftIO $ forM_ (aiPhysicsRefs levelLoaded) $ \((shape, _), _, setPosition) -> do
+                --     body <- get $ H.shapeBody shape
+                --     position <- get $ H.position body
+                --     setPosition position
 
                 renderables <- hSample $ renderCommands logicOutput
+                cameraCenterPos <- hSample $ cameraCenterPosition logicOutput
+
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
 
-                render (CDouble <$> V2 playerX playerY - camOffset) renderables
+                render (cameraCenterPos - camOffset) renderables
 
                 delayedEventTriggeredExit <- liftIO $ readIORef quitRef
-                let shouldQuit = any isJust mQuit || delayedEventTriggeredExit
+                let shouldQuit = delayedEventTriggeredExit
                 unless shouldQuit $
                     appLoop newTime $ timeAcc' - fromIntegral stepsToRun * timeStep
 
@@ -777,8 +381,6 @@ main = do
 
         appLoop startTime 0.0
 
-        liftIO $ freeHaskellFunPtr playerArbiterCallback
-
     spriterImages <- readIORef loadedImages
     forM_ spriterImages $ \sprPtr -> do
         spr <- deRefStablePtr sprPtr
@@ -788,13 +390,13 @@ main = do
 
     SDL.quit
 
-    free playerEntityInstance
-    free playerSpriterModel
-    free mummyEntityInstance
-    free mummySpriterModel
+    -- free playerEntityInstance
+    -- free playerSpriterModel
+    -- free mummyEntityInstance
+    -- free mummySpriterModel
     freeHaskellFunPtr imgloader
     freeHaskellFunPtr renderf
-    H.freeSpace space
+    -- H.freeSpace space
 
 renderSprite :: SDL.Renderer -> Spriter.Renderer
 renderSprite textureRenderer spritePtr spriteStatePtr = do
