@@ -258,6 +258,7 @@ holdGameMode mode newMode = do
 
 data CharacterOutput t = CharacterOutput
     { characterSurfaceVelocity :: Behavior t H.Vector
+    , characterForce :: Behavior t H.Vector
     , characterDirection :: Behavior t Direction
     , characterAnimation :: Behavior t String
     }
@@ -326,8 +327,119 @@ aiCharacterNetwork space aiTick pos = do
 
     return CharacterOutput
         { characterSurfaceVelocity = mummySurfaceVelocity
+        , characterForce = pure H.zero
         , characterDirection = mummyDisplayDir
         , characterAnimation = mummyAnimation
+        }
+
+playerNetwork :: forall t m. MonadGame t m =>
+    Time.UTCTime ->
+    Ptr H.Space ->
+    EventSelector t SdlEventTag ->
+    Behavior t (SDL.Scancode -> Bool) ->
+    Behavior t H.Vector ->
+    Behavior t Bool ->
+    Behavior t [Ptr H.Body] ->
+    Maybe (Behavior t Double) ->
+    Ptr H.Body ->
+    Ptr Spriter.CEntityInstance ->
+    m (CharacterOutput t)
+playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies mAxis body sprite = do
+    let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
+        eAPressed = pressEvent SDL.KeycodeA
+        eDPressed = pressEvent SDL.KeycodeD
+        eWPressed = pressEvent SDL.KeycodeW
+        eKPressed = pressEvent SDL.KeycodeK
+        padButtonPress = select sdlEventFan (JoyButtonEvent 0)
+        padAxisMove = select sdlEventFan (JoyAxisEvent 0)
+        padFilterButtonPress b = ffilter
+            (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) padButtonPress
+        ePadAPressed = padFilterButtonPress padButtonA
+        ePadXPressed = padFilterButtonPress padButtonX
+        ePadNotCenter = ffilter
+            (\(SDL.JoyAxisEventData _ a v) ->
+                 a == padXAxis &&
+                abs (fromIntegral v / 32768 :: Float) > 0.15)
+            padAxisMove
+        ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
+            <$> ePadNotCenter
+
+        ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
+        ePlayerWantsToKick = mconcat [() <$ eKPressed, () <$ ePadXPressed]
+        ePlayerKick = ePlayerWantsToKick -- TODO: Add check for current player state
+
+        jumpEvent = (-1000) <$ gate onGround ePlayerWantsToJump
+
+        jump imp = liftIO $ H.applyImpulse body (H.Vector 0 imp) H.zero
+
+        playerKickEffect :: H.Vector -> Direction -> [Ptr H.Body] -> Performable m ()
+        playerKickEffect playerP playerD currentAiBodies = do
+            let (pkc1, pkc2) = case playerD of
+                    DRight -> playerKickCheckR
+                    DLeft -> playerKickCheckL
+                playerKickVec = case playerD of
+                    DRight -> H.Vector 1000 (-1000)
+                    DLeft -> H.Vector (-1000) (-1000)
+
+            hitShapeInfo <- liftIO $ queryLineSeg space (playerP + pkc1, playerP + pkc2)
+
+            let hitShape = H.segQueryInfoShape hitShapeInfo
+            when (hitShape /= nullPtr) $ do
+                hitBody <- get $ H.shapeBody hitShape
+                liftIO $ H.applyImpulse hitBody playerKickVec H.zero
+                when (hitBody `elem` currentAiBodies) $ liftIO $ putStrLn "Kicked mummy"
+
+    let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
+        dPressed = ($ SDL.ScancodeD) <$> pressedKeys
+        playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
+        playerAxisMovement = CDouble <$> fromMaybe (pure 0) mAxis
+        playerMovement = limit $ (+) <$> playerKeyMovement <*> playerAxisMovement
+        playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
+        playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
+        playerSurfaceVelocity = bool
+            <$> pure (H.Vector 0 0) <*> playerAcc <*> onGround
+        playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
+
+        kickDuration = 0.6
+        kickDelay = 0.4
+        pickAnimation moving onGroundNow lastKickTime currentTime =
+            let runOrIdle
+                    | not onGroundNow = "Falling"
+                    | moving = "Run"
+                    | otherwise = "Idle"
+            in case lastKickTime of
+                Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
+                Nothing -> runOrIdle
+
+        clock = clockLossy (1/60) startTime
+
+    tickInfo <- current <$> clock
+    let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
+
+    latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerKick
+    eDelayedPlayerKick <- delay kickDelay ePlayerKick
+
+    playerDir <- hold DRight $ leftmost
+        [ DLeft <$ eAPressed
+        , DRight <$ eDPressed
+        , ePadChangeDir
+        ]
+
+    performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ ePlayerKick
+    performEvent_ $ playerKickEffect <$> pos <*> playerDir <*> aiBodies <@ eDelayedPlayerKick
+
+    performEvent_ $ jump <$> jumpEvent
+
+    let playerAnimation =
+            pickAnimation <$> playerMoving <*> onGround <*> latestPlayerKick <*> timeSinceStart
+        playerForce = bool
+            <$> playerAirForce <*> pure (H.Vector 0 0) <*> onGround
+
+    return CharacterOutput
+        { characterSurfaceVelocity = playerSurfaceVelocity
+        , characterForce = playerForce
+        , characterAnimation = playerAnimation
+        , characterDirection = playerDir
         }
 
 samplePhysics :: Ptr H.Body -> [Ptr H.Body] -> IO PhysicsOutput
@@ -377,119 +489,46 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
 
     initialPhysicsState <- liftIO $ samplePhysics playerBody aiBodies
 
-    let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
-        dPressed = ($ SDL.ScancodeD) <$> pressedKeys
-        playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
-        playerAxisMovement = CDouble <$> fromMaybe (pure 0) mAxis
-        playerMovement = limit $ (+) <$> playerKeyMovement <*> playerAxisMovement
-        playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
-        playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
-
     rec
-        let playerForce = bool
-                <$> playerAirForce <*> pure (H.Vector 0 0) <*> playerOnGround
-            playerSurfaceVelocity :: Behavior t H.Vector
-            playerSurfaceVelocity = bool
-                <$> pure (H.Vector 0 0) <*> playerAcc <*> playerOnGround
-            playerOnGround = physicsPlayerOnGround <$> physicsOutput
+        let playerOnGround = physicsPlayerOnGround <$> physicsOutput
 
+            playerPos = physicsPlayerPosition <$> physicsOutput
             aiSurfaceVelocities = sequenceA $ characterSurfaceVelocity <$> aiCharacters
             aiPositions = physicsAiPositions <$> physicsOutput :: Behavior t [H.Vector]
 
+        player <-
+            playerNetwork
+                startTime
+                space
+                sdlEventFan
+                pressedKeys
+                playerPos
+                playerOnGround
+                (pure aiBodies)
+                mAxis
+                playerBody
+                (playerSpriterInstance levelLoaded)
         -- TODO: Will only work for a single character and will crash if there are none :P
         -- fix with a normal map and holdGame maybe
         aiCharacters <- mapM (aiCharacterNetwork space aiTick) [head <$> aiPositions]
 
         eSteppedPhysics <- performEvent $ stepPhysics
-            <$> playerSurfaceVelocity <*> aiSurfaceVelocities <*> playerForce <@> eStepPhysics
+            <$> characterSurfaceVelocity player
+            <*> aiSurfaceVelocities
+            <*> characterForce player
+            <@> eStepPhysics
         physicsOutput <- hold initialPhysicsState eSteppedPhysics
 
-    let playerPos = physicsPlayerPosition <$> physicsOutput
-
     let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
-        eWPressed = pressEvent SDL.KeycodeW
-        eKPressed = pressEvent SDL.KeycodeK
         eF1Pressed = pressEvent SDL.KeycodeF1
         eF2Pressed = pressEvent SDL.KeycodeF2
         eF3Pressed = pressEvent SDL.KeycodeF3
-        eAPressed = pressEvent SDL.KeycodeA
-        eDPressed = pressEvent SDL.KeycodeD
-        padButtonPress = select sdlEventFan (JoyButtonEvent 0)
-        padAxisMove = select sdlEventFan (JoyAxisEvent 0)
-        padFilterButtonPress b = ffilter
-            (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) padButtonPress
-        ePadAPressed = padFilterButtonPress padButtonA
-        ePadXPressed = padFilterButtonPress padButtonX
-        ePadNotCenter = ffilter
-            (\(SDL.JoyAxisEventData _ a v) ->
-                 a == padXAxis &&
-                abs (fromIntegral v / 32768 :: Float) > 0.15)
-            padAxisMove
-        ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
-            <$> ePadNotCenter
 
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
-    playerDir <- hold DRight $ leftmost
-        [ DLeft <$ eAPressed
-        , DRight <$ eDPressed
-        , ePadChangeDir
-        ]
-
-    let ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
-        ePlayerWantsToKick = mconcat [() <$ eKPressed, () <$ ePadXPressed]
-        ePlayerKick = ePlayerWantsToKick -- TODO: Add check for current player state
-
-        jumpEvent = (-1000) <$ gate playerOnGround ePlayerWantsToJump
-
-        playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
-
-        jump imp = liftIO $ H.applyImpulse playerBody (H.Vector 0 imp) H.zero
-
-    let kickDuration = 0.6
-        kickDelay = 0.4
-        pickAnimation moving onGround lastKickTime currentTime =
-            let runOrIdle
-                    | not onGround = "Falling"
-                    | moving = "Run"
-                    | otherwise = "Idle"
-            in case lastKickTime of
-                Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
-                Nothing -> runOrIdle
-        clock = clockLossy (1/60) startTime
-        playerKickEffect :: H.Vector -> Direction -> Performable m ()
-        playerKickEffect playerP playerD = do
-            let (pkc1, pkc2) = case playerD of
-                    DRight -> playerKickCheckR
-                    DLeft -> playerKickCheckL
-                playerKickVec = case playerD of
-                    DRight -> H.Vector 1000 (-1000)
-                    DLeft -> H.Vector (-1000) (-1000)
-
-            hitShapeInfo <- liftIO $ queryLineSeg space (playerP + pkc1, playerP + pkc2)
-
-            let hitShape = H.segQueryInfoShape hitShapeInfo
-            when (hitShape /= nullPtr) $ do
-                hitBody <- get $ H.shapeBody hitShape
-                liftIO $ H.applyImpulse hitBody playerKickVec H.zero
-                when (hitBody `elem` aiBodies) $ liftIO $ putStrLn "Kicked mummy"
-
-    tickInfo <- current <$> clock
-    let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
-
-    latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerKick
-    eDelayedPlayerKick <- delay kickDelay ePlayerKick
 
     let playerEntityInstance = playerSpriterInstance levelLoaded
-
-    performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime playerEntityInstance 0) <$ ePlayerKick
-    performEvent_ $ playerKickEffect <$> playerPos <*> playerDir <@ eDelayedPlayerKick
-
-    performEvent_ $ jump <$> jumpEvent
-
-    let playerAnimation =
-            pickAnimation <$> playerMoving <*> playerOnGround <*> latestPlayerKick <*> timeSinceStart
         toV2 (H.Vector x y) = V2 x y
 
     eSpriterTick <- tickLossy spriterTimeStep startTime
@@ -501,7 +540,6 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
         performEvent_ $ liftIO . Spriter.setEntityInstanceTimeElapsed aiEntityInstance
             . realToFrac . (*1000) <$> eSpriterDiffs
 
-
     let aiAnimations = do
             aiCurrentPositions <- aiPositions
             aiCurrentAnimations <- sequenceA $ characterAnimation <$> aiCharacters
@@ -511,7 +549,7 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
 
         renderCharacters = sequenceA
             [ AnimatedSprite playerEntityInstance
-                <$> playerAnimation <*> fmap toV2 playerPos <*> playerDir
+                <$> characterAnimation player <*> fmap toV2 playerPos <*> characterDirection player
             ]
             <> aiAnimations
 
@@ -531,17 +569,16 @@ initLevelNetwork startTime sdlEventFan eStepPhysics pressedKeys mAxis levelLoade
                     ] ++ aiRenderShapes
                 chrLine chrP (p1, p2) =
                     Line (V4 255 0 0 255) (toV2 $ p1 + chrP) (toV2 $ p2 + chrP)
+                mummyLines mummyP =
+                    [ chrLine mummyP (mummySideCheckUL, mummySideCheckLL)
+                    , chrLine mummyP (mummySideCheckUR, mummySideCheckLR)
+                    , chrLine mummyP playerKickCheckR
+                    , chrLine mummyP playerKickCheckL
+                    ]
                 renderSideChecks =
                     [ chrLine playerP playerKickCheckR
                     , chrLine playerP playerKickCheckL
-                    ]
-                    ++ concatMap (\mummyP ->
-                                      [ chrLine mummyP (mummySideCheckUL, mummySideCheckLL)
-                                      , chrLine mummyP (mummySideCheckUR, mummySideCheckLR)
-                                      , chrLine mummyP playerKickCheckR
-                                      , chrLine mummyP playerKickCheckL
-                                      ]
-                                 ) currentAiPositions
+                    ] ++ concatMap mummyLines currentAiPositions
 
             debugRender <- debugRendering
             dbgRenderChrs <- characterDbg
