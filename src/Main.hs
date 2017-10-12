@@ -243,7 +243,7 @@ main = do
         render :: MonadIO m => V2 CDouble -> [Renderable] -> m ()
         render camOffset renderables = do
             SDL.rendererRenderTarget textureRenderer $= Just renderTexture
-            SDL.rendererDrawColor textureRenderer $= V4 150 150 200 255
+            SDL.rendererDrawColor textureRenderer $= V4 10 20 10 255
             SDL.clear textureRenderer
 
             liftIO $ forM_ renderables $ \renderable ->
