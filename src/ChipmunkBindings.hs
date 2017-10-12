@@ -140,6 +140,11 @@ position body = storableGetterSetter getter setter where
     getter vec = [C.exp| void { *$(cpVect* vec) = cpBodyGetPosition($(cpBody* body)) } |]
     setter vec = [C.exp| void { cpBodySetPosition($(cpBody* body), *$(cpVect* vec)) } |]
 
+velocity :: Ptr Body -> StateVar Vector
+velocity body = storableGetterSetter getter setter where
+    getter vec = [C.exp| void { *$(cpVect* vec) = cpBodyGetVelocity($(cpBody* body)) } |]
+    setter vec = [C.exp| void { cpBodySetVelocity($(cpBody* body), *$(cpVect* vec)) } |]
+
 force :: Ptr Body -> StateVar Vector
 force body = storableGetterSetter getter setter where
     getter vec = [C.exp| void { *$(cpVect* vec) = cpBodyGetForce($(cpBody* body)) } |]
