@@ -298,7 +298,7 @@ extend amount (start, end) =
         H.Vector x2 y2 = end
         dx = x2 - x1
         dy = y2 - y1
-        len = sqrt $ dx*dx + dy*dy
+        len = H.len (H.Vector dx dy)
         extension = H.Vector (dx / len * amount) (dy / len * amount)
     in (start, end + extension)
 
@@ -313,9 +313,12 @@ aiCharacterNetwork :: forall t m. MonadGame t m =>
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t)
 aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (feetShape, bodyShape) sprite = do
-    let mummySpeed AiRight = H.Vector (- playerSpeed / 6) 0
-        mummySpeed AiLeft = H.Vector (playerSpeed / 6) 0
-        mummySpeed AiStay = H.zero
+    let speedForAnim "Run" = playerSpeed / 3
+        speedForAnim _ = playerSpeed / 6
+
+        mummySpeed AiRight anim = H.Vector (- speedForAnim anim) 0
+        mummySpeed AiLeft anim = H.Vector (speedForAnim anim) 0
+        mummySpeed AiStay _ = H.zero
 
         rightSideSegment currentPos =
             ( currentPos + mummySideCheckUR
@@ -335,7 +338,26 @@ aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (fee
 
             mummyVisionLine = extend 20 <$> ((,) <$> mummyEyePos <*> playerBodyPosition)
 
-            doAiCollisionChecks mp visionLine = do
+            checkForPlayer dir visionLine@(H.Vector mx my, H.Vector px py) = liftIO $ do
+
+                playerSearchHitInfo <- queryLineSeg space visionLine aiVisibleFilter
+                let hitShape = H.segQueryInfoShape playerSearchHitInfo
+                    playerInFront = case dir of
+                        DRight -> px > mx
+                        DLeft -> px < mx
+                    distToPlayer = H.len $ H.Vector (px - mx) (py - my)
+                    playerAngleCos = abs (px - mx) / distToPlayer
+                    playerAngleAcceptable = playerAngleCos > cos (pi / 4)
+                playerNotBlocked <- if hitShape /= nullPtr
+                    then do
+                        hitBody <- get $ H.shapeBody hitShape
+                        return (hitBody == playerBody)
+                    else
+                        return False
+
+                return $ distToPlayer < 200 && playerInFront && playerAngleAcceptable && playerNotBlocked
+
+            doAiCollisionChecks mp = liftIO $ do
                 let (pkc1r, pkc2r) = playerKickCheckR
                     (pkc1l, pkc2l) = playerKickCheckL
                     segsToCheck =
@@ -345,42 +367,45 @@ aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (fee
                         , (pkc1l + mp, pkc2l + mp)
                         ]
 
-                playerSearchHitInfo <- queryLineSeg space visionLine aiVisibleFilter
-                let hitShape = H.segQueryInfoShape playerSearchHitInfo
-                when (hitShape /= nullPtr) $ do
-                    hitBody <- get $ H.shapeBody hitShape
-                    when (hitBody == playerBody) $ putStrLn "Can see player"
-
-                [cgr, cgl, cwr, cwl] <- forM segsToCheck $ \seg -> do
-                    segHitInfo <- queryLineSeg space seg groundCheckFilter
-                    return $ H.segQueryInfoShape segHitInfo /= nullPtr
+                [cgr, cgl, cwr, cwl] <- forM segsToCheck $ \seg ->
+                    queryLineSeg space seg groundCheckFilter
                 return (cgr, cgl, cwr, cwl)
 
-            runAiLogic (colGroundRight, colGroundLeft, colWallRight, colWallLeft) currentDir =
-                let canGoLeft = colGroundLeft && not colWallLeft
-                    canGoRight = colGroundRight && not colWallRight
-                in case currentDir of
+        eCanSeePlayer <- performEvent $ checkForPlayer <$> mummyDisplayDir <*> mummyVisionLine <@ aiTick
+
+        mummySeesPlayer <- hold False eCanSeePlayer
+
+        let runAiLogic (colGroundRight, colGroundLeft, colWallRight, colWallLeft) (currentDir, _currentAnim) = do
+                canSeePlayer <- sample mummySeesPlayer
+                dir <- sample mummyDisplayDir
+
+                let canGoLeft = H.segQueryInfoShape colGroundLeft /= nullPtr && H.segQueryInfoShape colWallLeft == nullPtr
+                    canGoRight = H.segQueryInfoShape colGroundRight /= nullPtr && H.segQueryInfoShape colWallRight == nullPtr
+
+                return $ case currentDir of
                     AiLeft
-                        | canGoLeft -> Nothing
-                        | canGoRight -> Just AiRight
-                        | otherwise -> Just AiStay
+                        | canGoLeft -> if not canSeePlayer then (AiLeft, "Walk") else (AiLeft, "Run")
+                        | canGoRight -> if canSeePlayer then (AiStay, "Idle") else (AiRight, "Walk")
+                        | otherwise -> (AiStay, "Idle")
                     AiRight
-                        | canGoRight -> Nothing
-                        | canGoLeft -> Just AiLeft
-                        | otherwise -> Just AiStay
+                        | canGoRight -> if not canSeePlayer then (AiRight, "Walk") else (AiRight, "Run")
+                        | canGoLeft -> if canSeePlayer then (AiStay, "Idle") else (AiLeft, "Walk")
+                        | otherwise -> (AiStay, "Idle")
                     AiStay
-                        | canGoRight -> Just AiRight
-                        | canGoLeft -> Just AiLeft
-                        | otherwise -> Nothing
+                        | canSeePlayer && dir == DRight && not canGoRight -> (AiStay, "Idle")
+                        | canSeePlayer && dir == DLeft && not canGoLeft -> (AiStay, "Idle")
+                        | canGoRight -> (AiRight, "Walk")
+                        | canGoLeft -> (AiLeft, "Walk")
+                        | otherwise -> (AiStay, "Idle")
 
-        colResults <- performEvent $ liftIO <$> (doAiCollisionChecks <$> pos <*> mummyVisionLine <@ aiTick)
+        colResults <- performEvent $ liftIO <$> (doAiCollisionChecks <$> pos <@ aiTick)
 
-        mummyWalkDirection <- foldDynMaybe runAiLogic AiStay colResults
+        mummyAiState <- foldDynM runAiLogic (AiStay, "Idle") colResults
+        let mummyWalkDirection = fst <$> mummyAiState
         mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection $ updated mummyWalkDirection
 
-    let mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection
-        mummyMoving = (\(H.Vector vx _) -> abs vx > 0) <$> mummySurfaceVelocity
-        mummyAnimation = (\moving -> if moving then "Walk" else "Idle") <$> mummyMoving
+    let mummyAnimation = current $ snd <$> mummyAiState
+        mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection <*> mummyAnimation
 
     let aiAnimation = do
             aiCurrentPosition <- pos
@@ -391,6 +416,7 @@ aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (fee
         renderColDebug = do
             currentAiPosition <- pos
             (eyePos, playerBodyPos) <- mummyVisionLine
+            seesPlayer <- mummySeesPlayer
 
             let renderFeetAndBody =
                     [ Shape feetShape characterFeetShapeType
@@ -405,7 +431,8 @@ aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (fee
                     , chrLine mummyP playerKickCheckL
                     ]
                 renderEnemyVision =
-                    Line (V4 0 255 0 255) (toV2 eyePos) (toV2 playerBodyPos)
+                    let color = if seesPlayer then V4 0 255 0 255 else V4 255 0 0 255
+                    in Line color (toV2 eyePos) (toV2 playerBodyPos)
                 renderSideChecks =
                      mummyLines currentAiPosition ++ [ renderEnemyVision ]
 

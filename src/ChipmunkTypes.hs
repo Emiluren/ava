@@ -26,6 +26,7 @@ module ChipmunkTypes
     , Handler(..)
 
     , scale
+    , len
     , makeBeginHandler
 
     , makePreSolveHandler
@@ -60,6 +61,9 @@ instance Num Vector where
     signum (Vector x y) = Vector (signum x) (signum y)
     fromInteger x = Vector (fromInteger x) (fromInteger x)
     negate (Vector x y) = Vector (-x) (-y)
+
+len :: Vector -> CpFloat
+len (Vector dx dy) = sqrt $ dx*dx + dy*dy
 
 instance Storable Vector where
     sizeOf _ = 2 * sizeOf (undefined :: CpFloat)

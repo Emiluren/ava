@@ -148,7 +148,7 @@ initLevel imgloader renderf levelData = do
 
     putStrLn "Creating player"
 
-    playerRefs@(playerFeetShape, playerBodyShape) <- makeCharacter space
+    playerRefs@(playerFeetShape, _) <- makeCharacter space
     playerBody <- get $ H.shapeBody playerFeetShape
     -- H.shapeFilter playerFeetShape $= aiVisibleFilter
     -- H.shapeFilter playerBodyShape $= aiVisibleFilter
