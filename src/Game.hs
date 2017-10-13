@@ -844,8 +844,8 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
     return LogicOutput
         { cameraCenterPosition = toV2 . physicsPlayerPosition <$> physicsOutput
         , renderCommands =
-                renderJetpack
-                <> renderParticles
+                renderParticles
+                <> renderJetpack
                 <> characterRendering player
                 <> mconcat (fmap characterRendering aiCharacters)
                 <> renderShapes
