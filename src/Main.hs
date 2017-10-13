@@ -2,7 +2,6 @@
 {-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
 module Main where
 
-import Control.Arrow ((***))
 import qualified Control.Concurrent.Chan as Chan
 import Control.Lens ((^.))
 import Control.Monad (unless)
@@ -15,7 +14,7 @@ import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Sum ((==>), DSum(..))
 import Data.Fixed (div')
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (isJust)
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
 import qualified Data.Vector as Vector
@@ -151,8 +150,8 @@ initLevel imgloader renderf levelData = do
 
     playerRefs@(playerFeetShape, playerBodyShape) <- makeCharacter space
     playerBody <- get $ H.shapeBody playerFeetShape
-    H.shapeFilter playerFeetShape $= aiVisibleFilter
-    H.shapeFilter playerBodyShape $= aiVisibleFilter
+    -- H.shapeFilter playerFeetShape $= aiVisibleFilter
+    -- H.shapeFilter playerBodyShape $= aiVisibleFilter
 
     putStrLn "Creating enemies"
 
@@ -193,9 +192,9 @@ mainReflex :: (MonadGame t m) =>
     EventSelector t SdlEventTag ->
     Event t Int ->
     Behavior t (SDL.Scancode -> Bool) ->
-    Maybe (Behavior t Double) ->
+    Maybe SDL.Joystick ->
     m (LogicOutput t)
-mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mAxis = do
+mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad = do
     eInit <- getPostBuild
 
     eLevelLoaded <- performEvent $ liftIO (initLevel imgloader renderf testLevel) <$ eInit
@@ -208,7 +207,7 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
 
     dGameMode <- holdGameMode
         (return initialOutput)
-        (initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mAxis <$> eLevelLoaded)
+        (initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad <$> eLevelLoaded)
 
     return LogicOutput
         { cameraCenterPosition = join $ current $ cameraCenterPosition <$> dGameMode
@@ -315,10 +314,6 @@ main = do
             then return Nothing
             else Just <$> SDL.openJoystick (Vector.head joysticks)
 
-        (mAxis, mSetAxis) <- case mGamepad of
-            Nothing -> return (Nothing, Nothing)
-            Just _ -> (Just *** Just) <$> mutableBehavior (0 :: Double)
-
         let sdlEventFan = fan eSdlEvent
             mainReflexWithParameters = mainReflex
                 imgloader
@@ -328,7 +323,7 @@ main = do
                 sdlEventFan
                 eStepPhysics
                 pressedKeys
-                mAxis
+                mGamepad
 
         eventChan <- liftIO Chan.newChan
         (logicOutput, FireCommand fire) <- hostPerformEventT $
@@ -355,13 +350,6 @@ main = do
                         when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
 
                 setPressedKeys =<< SDL.getKeyboardState
-
-                fromMaybe (return ()) $ do
-                    gamepad <- mGamepad
-                    setAxis <- mSetAxis
-                    let gateV v = if abs v < 0.15 then 0 else v
-                    Just $ setAxis =<< gateV . (/ 32768) . fromIntegral
-                        <$> SDL.axisPosition gamepad 0
 
                 mSdlTrigger <- liftIO $ readIORef sdlTriggerRef
                 case mSdlTrigger of

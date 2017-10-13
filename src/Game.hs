@@ -8,7 +8,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Bits (bit, complement)
 import Data.Bool (bool)
 import Data.GADT.Compare.TH
-import Data.Maybe (fromMaybe)
+import Data.Int (Int16)
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
@@ -44,9 +44,10 @@ shelfStart, shelfEnd :: Num a => (a, a)
 shelfStart = (100, 200)
 shelfEnd = (300, 320)
 
-padButtonX, padButtonA :: Word8
+padButtonX, padButtonA, padButtonY :: Num a => a
 padButtonA = 0
 padButtonX = 2
+padButtonY = 3
 
 padXAxis :: Word8
 padXAxis = 0
@@ -426,6 +427,32 @@ aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (fee
         , characterRendering = aiAnimation <> renderColDebug
         }
 
+data GamepadInput = GamepadInput
+    { leftXAxis :: CDouble
+    , yPressed :: Bool
+    }
+
+initialInput :: GamepadInput
+initialInput = GamepadInput
+    { leftXAxis = 0
+    , yPressed = False
+    }
+
+axisValue :: Int16 -> CDouble
+axisValue v = fromIntegral v / 32768
+
+pollInput :: MonadIO m => Maybe SDL.Joystick -> m GamepadInput
+pollInput mGamepad =
+    case mGamepad of
+        Nothing -> return initialInput
+        Just gamepad -> do
+            currentXLeftAxis <- SDL.axisPosition gamepad 0
+            currentYPressed <- SDL.buttonPressed gamepad padButtonY
+            return GamepadInput
+                { leftXAxis = (\v -> if abs v < 0.15 then 0 else v) $ axisValue currentXLeftAxis
+                , yPressed = currentYPressed
+                }
+
 playerNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
     Ptr H.Space ->
@@ -435,12 +462,12 @@ playerNetwork :: forall t m. MonadGame t m =>
     Behavior t Bool ->
     Behavior t [Ptr H.Body] ->
     Behavior t DebugRenderSettings ->
-    Maybe (Behavior t Double) ->
+    Maybe SDL.Joystick ->
     Ptr H.Body ->
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t, Behavior t Bool)
-playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debugSettings mAxis body (feetShape, bodyShape) sprite = do
+playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debugSettings mGamepad body (feetShape, bodyShape) sprite = do
     let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
@@ -455,7 +482,7 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debu
         ePadNotCenter = ffilter
             (\(SDL.JoyAxisEventData _ a v) ->
                  a == padXAxis &&
-                abs (fromIntegral v / 32768 :: Float) > 0.15)
+                abs (axisValue v) > 0.15)
             padAxisMove
         ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
             <$> ePadNotCenter
@@ -485,11 +512,17 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debu
                 liftIO $ H.applyImpulse hitBody playerKickVec H.zero
                 when (hitBody `elem` currentAiBodies) $ liftIO $ putStrLn "Kicked mummy"
 
+    ePollInput <- tickLossy (1/15) startTime
+    eCurrentInput <- performEvent $ pollInput mGamepad <$ ePollInput
+    gamepadInput <- hold initialInput eCurrentInput
+
+    performEvent_ $ liftIO . print <$> padButtonPress
+
     let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
         dPressed = ($ SDL.ScancodeD) <$> pressedKeys
         iPressed = ($ SDL.ScancodeI) <$> pressedKeys
         playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
-        playerAxisMovement = CDouble <$> fromMaybe (pure 0) mAxis
+        playerAxisMovement = leftXAxis <$> gamepadInput
         playerMovement = limit $ (+) <$> playerKeyMovement <*> playerAxisMovement
         playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
         playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
@@ -530,7 +563,7 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debu
     let playerAnimation =
             pickAnimation <$> playerMoving <*> onGround <*> latestPlayerKick <*> timeSinceStart
         horizontalForce = bool <$> playerAirForce <*> pure H.zero <*> onGround
-        jetpackOn = iPressed
+        jetpackOn = (||) <$> iPressed <*> fmap yPressed gamepadInput
         verticalForce = bool H.zero (H.Vector 0 $ -6000) <$> jetpackOn
         playerForce = horizontalForce + verticalForce
 
@@ -627,10 +660,10 @@ initLevelNetwork :: forall t m. MonadGame t m =>
     EventSelector t SdlEventTag ->
     Event t Int ->
     Behavior t (SDL.Scancode -> Bool) ->
-    Maybe (Behavior t Double) ->
+    Maybe SDL.Joystick ->
     LevelLoadedData ->
     m (LogicOutput t)
-initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mAxis levelLoaded = do
+initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad levelLoaded = do
     let space = levelSpace levelLoaded
         (playerFeetShape, playerBodyShape) = playerPhysicsRefs levelLoaded
         aiShapesAndSprites = aiPhysicsRefs levelLoaded :: [(CharacterPhysicsRefs, Ptr Spriter.CEntityInstance)]
@@ -661,7 +694,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
-    colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
+    colCheckDbg <- current <$> toggle True (gate debugRendering eF3Pressed)
 
     let debugRenderSettings = DebugRenderSettings
             <$> debugRendering
@@ -685,7 +718,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 playerOnGround
                 (pure aiBodies)
                 debugRenderSettings
-                mAxis
+                mGamepad
                 playerBody
                 (playerFeetShape, playerBodyShape)
                 (playerSpriterInstance levelLoaded)
