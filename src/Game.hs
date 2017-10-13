@@ -657,14 +657,14 @@ samplePhysics playerBody characterBodies = do
         , physicsAiPositions = aiPositions
         }
 
-particleLifetime, particleSpawnInterval :: Time.NominalDiffTime
-particleLifetime = 0.5
-particleSpawnInterval = 0.05
+particleSpawnInterval :: Time.NominalDiffTime
+particleSpawnInterval = 0.02
 
 data Particle = Particle
     { particleVelocity :: V2 CDouble
     , particleAngularVel :: CDouble
     , particleStartTime :: Time.UTCTime
+    , particleLifetime :: Time.NominalDiffTime
     , particleStartPos :: V2 CDouble
     } deriving Show
 
@@ -678,7 +678,7 @@ particleState time particle =
 particleAlive :: Time.UTCTime -> Particle -> Bool
 particleAlive time particle =
     let livedTime = Time.diffUTCTime time (particleStartTime particle)
-    in livedTime < particleLifetime
+    in livedTime < particleLifetime particle
 
 initLevelNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
@@ -808,6 +808,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 { particleVelocity = toV2 playerV + V2 xv 200
                 , particleAngularVel = xv
                 , particleStartTime = t
+                , particleLifetime = realToFrac $ 0.5 + 0.05 * xv
                 , particleStartPos = pos
                 }
         eNewParticle = pushAlways spawnParticle eParXVel
