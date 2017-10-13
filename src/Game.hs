@@ -302,6 +302,21 @@ extend amount (start, end) =
         extension = H.Vector (dx / len * amount) (dy / len * amount)
     in (start, end + extension)
 
+debugRenderCharacter :: Reflex t => Behavior t DebugRenderSettings -> [Renderable] -> [Renderable] -> Behavior t [Renderable]
+debugRenderCharacter debugSettings renderFeetAndBody renderSideChecks = do
+    debugRender <- debugRenderAtAll <$> debugSettings
+    if not debugRender then
+        return []
+    else do
+        dbgRenderChrs <- debugRenderCharacterShapes <$> debugSettings
+        dbgRenderCol <- debugRenderCharacterChecks <$> debugSettings
+        return $ case (dbgRenderChrs, dbgRenderCol) of
+             (False, False) -> []
+             (True, False) -> renderFeetAndBody
+             (False, True) -> renderSideChecks
+             (True, True) -> renderFeetAndBody <> renderSideChecks
+
+
 aiCharacterNetwork :: forall t m. MonadGame t m =>
     Ptr H.Space ->
     Ptr H.Body ->
@@ -436,15 +451,7 @@ aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (fee
                 renderSideChecks =
                      mummyLines currentAiPosition ++ [ renderEnemyVision ]
 
-            debugRender <- debugRenderAtAll <$> debugSettings
-            dbgRenderChrs <- debugRenderCharacterShapes <$> debugSettings
-            dbgRenderCol <- debugRenderCharacterChecks <$> debugSettings
-            case (debugRender, dbgRenderChrs, dbgRenderCol) of
-                (False, _, _) -> return []
-                (True, False, False) -> return []
-                (True, True, False) -> return renderFeetAndBody
-                (True, False, True) -> return renderSideChecks
-                (True, True, True) -> return $ renderFeetAndBody ++ renderSideChecks
+            debugRenderCharacter debugSettings renderFeetAndBody renderSideChecks
 
     return CharacterOutput
         { characterSurfaceVelocity = mummySurfaceVelocity
@@ -611,15 +618,7 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debu
                     , chrLine playerP playerKickCheckL
                     ]
 
-            debugRender <- debugRenderAtAll <$> debugSettings
-            dbgRenderChrs <- debugRenderCharacterShapes <$> debugSettings
-            dbgRenderCol <- debugRenderCharacterChecks <$> debugSettings
-            case (debugRender, dbgRenderChrs, dbgRenderCol) of
-                (False, _, _) -> return []
-                (True, False, False) -> return []
-                (True, True, False) -> return renderFeetAndBody
-                (True, False, True) -> return renderSideChecks
-                (True, True, True) -> return $ renderFeetAndBody ++ renderSideChecks
+            debugRenderCharacter debugSettings renderFeetAndBody renderSideChecks
 
     return ( CharacterOutput
              { characterSurfaceVelocity = playerSurfaceVelocity
@@ -721,7 +720,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
-    colCheckDbg <- current <$> toggle True (gate debugRendering eF3Pressed)
+    colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
 
     let debugRenderSettings = DebugRenderSettings
             <$> debugRendering
