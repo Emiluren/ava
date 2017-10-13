@@ -129,6 +129,37 @@ shapeBody shape = makeStateVar getter setter where
     getter = [C.exp| cpBody* { cpShapeGetBody($(cpShape* shape)) } |]
     setter b = [C.exp| void { cpShapeSetBody($(cpShape* shape), $(cpBody* b)) } |]
 
+
+-- TODO: could be made much simpler with storable instance but that crashes with <<loop>>
+shapeFilter :: Ptr Shape -> StateVar ShapeFilter
+shapeFilter shape = makeStateVar getter setter where
+    getter = do
+        groupPtr <- malloc
+        categoriesPtr <- malloc
+        maskPtr <- malloc
+        [C.block| void {
+            cpShapeFilter filter = cpShapeGetFilter($(cpShape* shape));
+            *$(unsigned int* groupPtr) = filter.group;
+            *$(unsigned int* categoriesPtr) = filter.group;
+            *$(unsigned int* maskPtr) = filter.group;
+        } |]
+        group <- peek groupPtr
+        categories <- peek categoriesPtr
+        mask <- peek maskPtr
+        free groupPtr
+        free categoriesPtr
+        free maskPtr
+        return $ ShapeFilter group categories mask
+    setter (ShapeFilter group categories mask) =
+        [C.block| void {
+            cpShapeFilter filter;
+            filter.group = $(unsigned int group);
+            filter.categories = $(unsigned int categories);
+            filter.mask = $(unsigned int mask);
+            cpShapeSetFilter($(cpShape* shape), filter);
+        } |]
+
+
 newBody :: CpFloat -> CpFloat -> IO (Ptr Body)
 newBody m i = [C.exp| cpBody* { cpBodyNew($(double m), $(double i)) } |]
 

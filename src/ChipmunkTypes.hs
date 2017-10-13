@@ -99,7 +99,6 @@ instance Storable SegmentQueryInfo where
         >> pokeByteOff ptr normalOffset normal
         >> pokeByteOff ptr alphaOffset alpha
 
-
 data ShapeFilter = ShapeFilter
     -- Two objects with the same non-zero group value do not collide.
     -- This is generally used to group objects in a composite object together to disable self collisions.
@@ -111,6 +110,23 @@ data ShapeFilter = ShapeFilter
     -- The category/mask combinations of both objects in a collision must agree for a collision to occur.
     , shapeFilterMask :: CpBitmask
     } deriving Show
+
+filterCategoriesOffset, filterMaskOffset :: Int
+filterCategoriesOffset = sizeOf (undefined :: CpGroup)
+filterMaskOffset = filterMaskOffset + sizeOf (undefined :: CpBitmask)
+
+-- TODO: program crashes with message <<loop>> when this is used
+instance Storable ShapeFilter where
+    sizeOf _ = sizeOf (undefined :: CpGroup) + 2 * sizeOf (undefined :: CpBitmask)
+    alignment _ = alignment (undefined :: CpBitmask)
+    peek ptr = ShapeFilter
+        <$> peekByteOff ptr 0
+        <*> peekByteOff ptr filterCategoriesOffset
+        <*> peekByteOff ptr filterMaskOffset
+    poke ptr (ShapeFilter group cat mask) =
+        pokeByteOff ptr 0 group
+        >> pokeByteOff ptr filterCategoriesOffset cat
+        >> pokeByteOff ptr filterMaskOffset mask
 
 scale :: Vector -> CpFloat -> Vector
 scale (Vector x y) s = Vector (x * s) (y * s)
@@ -176,6 +192,7 @@ chipmunkTypeTable = Map.fromList
     , (TypeName "cpBody", [t| Body |])
     , (TypeName "cpShape", [t| Shape |])
     , (TypeName "cpVect", [t| Vector |])
+    , (TypeName "cpShapeFilter", [t| ShapeFilter |])
     , (TypeName "cpBool", [t| Bool |])
     , (TypeName "cpArbiter", [t| Arbiter |])
     , (TypeName "cpSegmentQueryInfo", [t| SegmentQueryInfo |])

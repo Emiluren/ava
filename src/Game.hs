@@ -5,9 +5,9 @@ import Control.Monad (replicateM_)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (MonadIO, liftIO)
 
+import Data.Bits (bit, complement)
 import Data.Bool (bool)
 import Data.GADT.Compare.TH
-import Data.List (zipWith4)
 import Data.Maybe (fromMaybe)
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
@@ -35,6 +35,10 @@ import qualified ChipmunkTypes as H
 
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
+
+-- TODO: Move to chipmunk bindings
+toV2 :: H.Vector -> V2 CDouble
+toV2 (H.Vector x y) = V2 x y
 
 shelfStart, shelfEnd :: Num a => (a, a)
 shelfStart = (100, 200)
@@ -164,8 +168,10 @@ characterMass = 5
 characterFeetFriction = 2
 characterSide = characterWidth * 0.7
 
-playerFeetCollisionType :: CUInt
+playerFeetCollisionType, mummyCollisionType, wallCollisionType :: CUInt
 playerFeetCollisionType = 1
+mummyCollisionType = 2
+wallCollisionType = 3
 
 characterFeetShapeType, characterBodyShapeType :: H.ShapeType
 characterFeetShapeType = H.Circle (characterWidth * 0.3) (H.Vector 0 $ - characterWidth * 0.2)
@@ -223,6 +229,23 @@ groundCheckFilter = H.ShapeFilter
     , H.shapeFilterMask = H.allCategories
     }
 
+visibleByAiBit :: H.CpBitmask
+visibleByAiBit = bit 31
+
+aiVisibleFilter :: H.ShapeFilter
+aiVisibleFilter = H.ShapeFilter
+    { H.shapeFilterGroup = H.noGroup
+    , H.shapeFilterMask = visibleByAiBit
+    , H.shapeFilterCategories = visibleByAiBit
+    }
+
+aiInvisibleFilter :: H.ShapeFilter
+aiInvisibleFilter = H.ShapeFilter
+    { H.shapeFilterGroup = H.noGroup
+    , H.shapeFilterMask = complement visibleByAiBit
+    , H.shapeFilterCategories = complement visibleByAiBit
+    }
+
 limit :: (Num a, Ord a, Reflex t) => Behavior t a -> Behavior t a
 limit = fmap limf where
     limf x
@@ -256,17 +279,39 @@ data CharacterOutput t = CharacterOutput
     , characterForce :: Behavior t H.Vector
     , characterDirection :: Behavior t Direction
     , characterAnimation :: Behavior t String
+    , characterRendering :: Behavior t [ Renderable ]
     }
 
-queryLineSeg :: Ptr H.Space -> (H.Vector, H.Vector) -> IO H.SegmentQueryInfo
-queryLineSeg space (s, e) = H.spaceSegmentQueryFirst space s e 1 groundCheckFilter
+queryLineSeg :: Ptr H.Space -> (H.Vector, H.Vector) -> H.ShapeFilter -> IO H.SegmentQueryInfo
+queryLineSeg space (s, e) = H.spaceSegmentQueryFirst space s e 1
+
+data DebugRenderSettings = DebugRenderSettings
+    { debugRenderAtAll :: Bool
+    , debugRenderCharacterShapes :: Bool
+    , debugRenderCharacterChecks :: Bool
+    }
+
+extend :: CDouble -> (H.Vector, H.Vector) -> (H.Vector, H.Vector)
+extend amount (start, end) =
+    let H.Vector x1 y1 = start
+        H.Vector x2 y2 = end
+        dx = x2 - x1
+        dy = y2 - y1
+        len = sqrt $ dx*dx + dy*dy
+        extension = H.Vector (dx / len * amount) (dy / len * amount)
+    in (start, end + extension)
 
 aiCharacterNetwork :: forall t m. MonadGame t m =>
     Ptr H.Space ->
+    Ptr H.Body ->
     Event t TickInfo ->
     Behavior t H.Vector ->
+    Behavior t DebugRenderSettings ->
+    Behavior t H.Vector ->
+    (Ptr H.Shape, Ptr H.Shape) ->
+    Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t)
-aiCharacterNetwork space aiTick pos = do
+aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (feetShape, bodyShape) sprite = do
     let mummySpeed AiRight = H.Vector (- playerSpeed / 6) 0
         mummySpeed AiLeft = H.Vector (playerSpeed / 6) 0
         mummySpeed AiStay = H.zero
@@ -280,51 +325,105 @@ aiCharacterNetwork space aiTick pos = do
             , currentPos + mummySideCheckLL
             )
 
-        doAiCollisionChecks mp = do
-            let (pkc1r, pkc2r) = playerKickCheckR
-                (pkc1l, pkc2l) = playerKickCheckL
-                segsToCheck =
-                    [ rightSideSegment mp
-                    , leftSideSegment mp
-                    , (pkc1r + mp, pkc2r + mp)
-                    , (pkc1l + mp, pkc2l + mp)
-                    ]
+        playerBodyPosition = playerPosition - pure (H.Vector 0 15)
 
-            [cgr, cgl, cwr, cwl] <- forM segsToCheck $ \seg -> do
-                segHitInfo <- queryLineSeg space seg
-                return $ H.segQueryInfoShape segHitInfo /= nullPtr
-            return (cgr, cgl, cwr, cwl)
+    --body <- get $ H.shapeBody feetShape
 
-        runAiLogic (colGroundRight, colGroundLeft, colWallRight, colWallLeft) currentDir =
-            let canGoLeft = colGroundLeft && not colWallLeft
-                canGoRight = colGroundRight && not colWallRight
-            in case currentDir of
-                AiLeft
-                    | canGoLeft -> Nothing
-                    | canGoRight -> Just AiRight
-                    | otherwise -> Just AiStay
-                AiRight
-                    | canGoRight -> Nothing
-                    | canGoLeft -> Just AiLeft
-                    | otherwise -> Just AiStay
-                AiStay
-                    | canGoRight -> Just AiRight
-                    | canGoLeft -> Just AiLeft
-                    | otherwise -> Nothing
-    colResults <- performEvent $ liftIO . doAiCollisionChecks <$> pos <@ aiTick
+    rec
+        let mummyEyePos = pos + pure (H.Vector 0 (-20))
 
-    mummyWalkDirection <- foldDynMaybe runAiLogic AiStay colResults
-    mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection $ updated mummyWalkDirection
+            mummyVisionLine = extend 20 <$> ((,) <$> mummyEyePos <*> playerBodyPosition)
+
+            doAiCollisionChecks mp visionLine = do
+                let (pkc1r, pkc2r) = playerKickCheckR
+                    (pkc1l, pkc2l) = playerKickCheckL
+                    segsToCheck =
+                        [ rightSideSegment mp
+                        , leftSideSegment mp
+                        , (pkc1r + mp, pkc2r + mp)
+                        , (pkc1l + mp, pkc2l + mp)
+                        ]
+
+                playerSearchHitInfo <- queryLineSeg space visionLine aiVisibleFilter
+                let hitShape = H.segQueryInfoShape playerSearchHitInfo
+                when (hitShape /= nullPtr) $ do
+                    hitBody <- get $ H.shapeBody hitShape
+                    when (hitBody == playerBody) $ putStrLn "Can see player"
+
+                [cgr, cgl, cwr, cwl] <- forM segsToCheck $ \seg -> do
+                    segHitInfo <- queryLineSeg space seg groundCheckFilter
+                    return $ H.segQueryInfoShape segHitInfo /= nullPtr
+                return (cgr, cgl, cwr, cwl)
+
+            runAiLogic (colGroundRight, colGroundLeft, colWallRight, colWallLeft) currentDir =
+                let canGoLeft = colGroundLeft && not colWallLeft
+                    canGoRight = colGroundRight && not colWallRight
+                in case currentDir of
+                    AiLeft
+                        | canGoLeft -> Nothing
+                        | canGoRight -> Just AiRight
+                        | otherwise -> Just AiStay
+                    AiRight
+                        | canGoRight -> Nothing
+                        | canGoLeft -> Just AiLeft
+                        | otherwise -> Just AiStay
+                    AiStay
+                        | canGoRight -> Just AiRight
+                        | canGoLeft -> Just AiLeft
+                        | otherwise -> Nothing
+
+        colResults <- performEvent $ liftIO <$> (doAiCollisionChecks <$> pos <*> mummyVisionLine <@ aiTick)
+
+        mummyWalkDirection <- foldDynMaybe runAiLogic AiStay colResults
+        mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection $ updated mummyWalkDirection
 
     let mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection
         mummyMoving = (\(H.Vector vx _) -> abs vx > 0) <$> mummySurfaceVelocity
         mummyAnimation = (\moving -> if moving then "Walk" else "Idle") <$> mummyMoving
+
+    let aiAnimation = do
+            aiCurrentPosition <- pos
+            aiCurrentAnimation <- mummyAnimation
+            aiCurrentDirection <- mummyDisplayDir
+            return [ AnimatedSprite sprite aiCurrentAnimation (toV2 aiCurrentPosition) aiCurrentDirection ]
+
+        renderColDebug = do
+            currentAiPosition <- pos
+            (eyePos, playerBodyPos) <- mummyVisionLine
+
+            let renderFeetAndBody =
+                    [ Shape feetShape characterFeetShapeType
+                    , Shape bodyShape characterBodyShapeType
+                    ]
+                chrLine chrP (p1, p2) =
+                    Line (V4 255 0 0 255) (toV2 $ p1 + chrP) (toV2 $ p2 + chrP)
+                mummyLines mummyP =
+                    [ chrLine mummyP (mummySideCheckUL, mummySideCheckLL)
+                    , chrLine mummyP (mummySideCheckUR, mummySideCheckLR)
+                    , chrLine mummyP playerKickCheckR
+                    , chrLine mummyP playerKickCheckL
+                    ]
+                renderEnemyVision =
+                    Line (V4 0 255 0 255) (toV2 eyePos) (toV2 playerBodyPos)
+                renderSideChecks =
+                     mummyLines currentAiPosition ++ [ renderEnemyVision ]
+
+            debugRender <- debugRenderAtAll <$> debugSettings
+            dbgRenderChrs <- debugRenderCharacterShapes <$> debugSettings
+            dbgRenderCol <- debugRenderCharacterChecks <$> debugSettings
+            case (debugRender, dbgRenderChrs, dbgRenderCol) of
+                (False, _, _) -> return []
+                (True, False, False) -> return []
+                (True, True, False) -> return renderFeetAndBody
+                (True, False, True) -> return renderSideChecks
+                (True, True, True) -> return $ renderFeetAndBody ++ renderSideChecks
 
     return CharacterOutput
         { characterSurfaceVelocity = mummySurfaceVelocity
         , characterForce = pure H.zero
         , characterDirection = mummyDisplayDir
         , characterAnimation = mummyAnimation
+        , characterRendering = aiAnimation <> renderColDebug
         }
 
 playerNetwork :: forall t m. MonadGame t m =>
@@ -335,11 +434,13 @@ playerNetwork :: forall t m. MonadGame t m =>
     Behavior t H.Vector ->
     Behavior t Bool ->
     Behavior t [Ptr H.Body] ->
+    Behavior t DebugRenderSettings ->
     Maybe (Behavior t Double) ->
     Ptr H.Body ->
+    (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t, Behavior t Bool)
-playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies mAxis body sprite = do
+playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debugSettings mAxis body (feetShape, bodyShape) sprite = do
     let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
@@ -376,7 +477,7 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies mAxi
                     DRight -> H.Vector 1000 (-1000)
                     DLeft -> H.Vector (-1000) (-1000)
 
-            hitShapeInfo <- liftIO $ queryLineSeg space (playerP + pkc1, playerP + pkc2)
+            hitShapeInfo <- liftIO $ queryLineSeg space (playerP + pkc1, playerP + pkc2) groundCheckFilter
 
             let hitShape = H.segQueryInfoShape hitShapeInfo
             when (hitShape /= nullPtr) $ do
@@ -433,11 +534,39 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies mAxi
         verticalForce = bool H.zero (H.Vector 0 $ -6000) <$> jetpackOn
         playerForce = horizontalForce + verticalForce
 
+        renderCharacter = sequenceA
+            [ AnimatedSprite sprite <$> playerAnimation <*> fmap toV2 pos <*> playerDir
+            ]
+
+        renderColDebug = do
+            playerP <- pos
+            let renderFeetAndBody =
+                    [ Shape feetShape characterFeetShapeType
+                    , Shape bodyShape characterBodyShapeType
+                    ]
+                chrLine chrP (p1, p2) =
+                    Line (V4 255 0 0 255) (toV2 $ p1 + chrP) (toV2 $ p2 + chrP)
+                renderSideChecks =
+                    [ chrLine playerP playerKickCheckR
+                    , chrLine playerP playerKickCheckL
+                    ]
+
+            debugRender <- debugRenderAtAll <$> debugSettings
+            dbgRenderChrs <- debugRenderCharacterShapes <$> debugSettings
+            dbgRenderCol <- debugRenderCharacterChecks <$> debugSettings
+            case (debugRender, dbgRenderChrs, dbgRenderCol) of
+                (False, _, _) -> return []
+                (True, False, False) -> return []
+                (True, True, False) -> return renderFeetAndBody
+                (True, False, True) -> return renderSideChecks
+                (True, True, True) -> return $ renderFeetAndBody ++ renderSideChecks
+
     return ( CharacterOutput
              { characterSurfaceVelocity = playerSurfaceVelocity
              , characterForce = playerForce
              , characterAnimation = playerAnimation
              , characterDirection = playerDir
+             , characterRendering = renderCharacter <> renderColDebug
              }
            , jetpackOn
            )
@@ -456,7 +585,9 @@ samplePhysics playerBody characterBodies = do
         (s1, s2) <- H.arbiterGetShapes arb
         ct1 <- get $ H.collisionType s1
         ct2 <- get $ H.collisionType s2
-        return (ct1 == playerFeetCollisionType && ct2 == 0)
+        let isPlayer = ct1 == playerFeetCollisionType
+            onSolid = ct2 == mummyCollisionType || ct2 == wallCollisionType
+        return (isPlayer && onSolid)
     playerPosition <- get $ H.position playerBody
     playerVelocity <- get $ H.velocity playerBody
     aiPositions <- mapM (get . H.position) characterBodies
@@ -523,6 +654,20 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
     initialPhysicsState <- liftIO $ samplePhysics playerBody aiBodies
 
+    let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
+        eF1Pressed = pressEvent SDL.KeycodeF1
+        eF2Pressed = pressEvent SDL.KeycodeF2
+        eF3Pressed = pressEvent SDL.KeycodeF3
+
+    debugRendering <- current <$> toggle True eF1Pressed
+    characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
+    colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
+
+    let debugRenderSettings = DebugRenderSettings
+            <$> debugRendering
+            <*> characterDbg
+            <*> colCheckDbg
+
     rec
         let playerOnGround = physicsPlayerOnGround <$> physicsOutput
             playerPosition = physicsPlayerPosition <$> physicsOutput
@@ -539,12 +684,19 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 playerPosition
                 playerOnGround
                 (pure aiBodies)
+                debugRenderSettings
                 mAxis
                 playerBody
+                (playerFeetShape, playerBodyShape)
                 (playerSpriterInstance levelLoaded)
+
         -- TODO: Will only work for a single character and will crash if there are none :P
         -- fix with a normal map and holdGame maybe
-        aiCharacters <- mapM (aiCharacterNetwork space aiTick) [head <$> aiPositions]
+        aiCharacters <-
+            mapM
+                (\(pos, shapes, sprite) ->
+                     aiCharacterNetwork space playerBody aiTick playerPosition debugRenderSettings pos shapes sprite)
+                [(head <$> aiPositions, head aiShapes, head aiSprites)]
 
         eSteppedPhysics <- performEvent $ stepPhysics
             <$> characterSurfaceVelocity player
@@ -553,17 +705,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             <@> eStepPhysics
         physicsOutput <- hold initialPhysicsState eSteppedPhysics
 
-    let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
-        eF1Pressed = pressEvent SDL.KeycodeF1
-        eF2Pressed = pressEvent SDL.KeycodeF2
-        eF3Pressed = pressEvent SDL.KeycodeF3
-
-    debugRendering <- current <$> toggle True eF1Pressed
-    characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
-    colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
-
     let playerEntityInstance = playerSpriterInstance levelLoaded
-        toV2 (H.Vector x y) = V2 x y
 
     eSpriterTick <- tickLossy spriterTimeStep startTime
     eSpriterDiffs <- mapAccum_ (\oldTime newTime -> (newTime, Time.diffUTCTime newTime oldTime))
@@ -615,51 +757,12 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         particles <- hold [] $ flip (:) <$> aliveParticles <@> eNewParticle
         let aliveParticles = (filter . particleAlive) <$> time <*> particles
 
-    let aiAnimations = do
-            aiCurrentPositions <- aiPositions
-            aiCurrentAnimations <- sequenceA $ characterAnimation <$> aiCharacters
-            aiCurrentDirections <- sequenceA $ characterDirection <$> aiCharacters
-            return $ zipWith4 AnimatedSprite
-                aiSprites aiCurrentAnimations (toV2 <$> aiCurrentPositions) aiCurrentDirections
-
-        renderCharacters = sequenceA
-            [ AnimatedSprite playerEntityInstance
-                <$> characterAnimation player <*> fmap toV2 playerPosition <*> characterDirection player
-            ]
-            <> aiAnimations
-
-        renderColDebug = do
-            currentAiPositions <- aiPositions
-            playerP <- playerPosition
-            let renderFeetAndBody (feetShape, bodyShape) =
-                    [ Shape feetShape characterFeetShapeType
-                    , Shape bodyShape characterBodyShapeType
-                    ]
-                renderShapes = uncurry Shape <$> extraPhysicsRefs levelLoaded
-                renderCharacterColliders =
-                    renderFeetAndBody (playerFeetShape, playerBodyShape)
-                    ++ concatMap renderFeetAndBody aiShapes
-                chrLine chrP (p1, p2) =
-                    Line (V4 255 0 0 255) (toV2 $ p1 + chrP) (toV2 $ p2 + chrP)
-                mummyLines mummyP =
-                    [ chrLine mummyP (mummySideCheckUL, mummySideCheckLL)
-                    , chrLine mummyP (mummySideCheckUR, mummySideCheckLR)
-                    , chrLine mummyP playerKickCheckR
-                    , chrLine mummyP playerKickCheckL
-                    ]
-                renderSideChecks =
-                    [ chrLine playerP playerKickCheckR
-                    , chrLine playerP playerKickCheckL
-                    ] ++ concatMap mummyLines currentAiPositions
-            debugRender <- debugRendering
-            dbgRenderChrs <- characterDbg
-            dbgRenderCol <- colCheckDbg
-            case (debugRender, dbgRenderChrs, dbgRenderCol) of
-                (False, _, _) -> return []
-                (True, False, False) -> return renderShapes
-                (True, True, False) -> return $ renderShapes ++ renderCharacterColliders
-                (True, False, True) -> return $ renderShapes ++ renderSideChecks
-                (True, True, True) -> return $ renderShapes ++ renderCharacterColliders ++ renderSideChecks
+    let renderShapes = do
+            dbgRender <- debugRendering
+            if dbgRender then
+                return $ uncurry Shape <$> extraPhysicsRefs levelLoaded
+            else
+                return []
 
         renderJetpack = do
             pos <- jetpackPosition
@@ -683,7 +786,8 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         , renderCommands =
                 renderJetpack
                 <> renderParticles
-                <> renderCharacters
-                <> renderColDebug
+                <> characterRendering player
+                <> mconcat (fmap characterRendering aiCharacters)
+                <> renderShapes
         , quit = () <$ pressEvent SDL.KeycodeQ
         }

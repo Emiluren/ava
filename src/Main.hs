@@ -117,13 +117,19 @@ initLevel imgloader renderf levelData = do
         (Spriter.loadSpriterModel imgloader renderf)
     wall <- H.spaceGetStaticBody space
 
+    putStrLn "Creating walls"
+
     wallShapes <- forM (wallEdges levelData) $ \(start, end) -> do
         let wst = H.LineSegment start end 1
-        w <- H.newShape wall wst
-        H.friction w $= 1.0
-        H.elasticity w $= 0.6
-        H.spaceAddShape space w
-        return (w, wst)
+        wallShape <- H.newShape wall wst
+        H.collisionType wallShape $= wallCollisionType
+        H.shapeFilter wallShape $= groundCheckFilter
+        H.friction wallShape $= 1.0
+        H.elasticity wallShape $= 0.6
+        H.spaceAddShape space wallShape
+        return (wallShape, wst)
+
+    putStrLn "Creating misc objects"
 
     extraObjectRefs <- forM (extraObjects levelData) $ \(objectType, initPosition) ->
         case objectType of
@@ -141,15 +147,25 @@ initLevel imgloader renderf levelData = do
                 H.position circleBody $= initPosition
                 return (circleShape, circleShapeType)
 
-    playerRefs@(playerFeetShape, _) <- makeCharacter space
+    putStrLn "Creating player"
+
+    playerRefs@(playerFeetShape, playerBodyShape) <- makeCharacter space
     playerBody <- get $ H.shapeBody playerFeetShape
+    H.shapeFilter playerFeetShape $= aiVisibleFilter
+    H.shapeFilter playerBodyShape $= aiVisibleFilter
+
+    putStrLn "Creating enemies"
 
     aiRefs <- forM (initEnemies levelData) $ \(enemyType, initPosition) ->
         case enemyType of
             Mummy -> do
-                mummyRefs@(mummyFeetShape, _) <- makeCharacter space
+                mummyRefs@(mummyFeetShape, mummyBodyShape) <- makeCharacter space
                 mummyBody <- get $ H.shapeBody mummyFeetShape
                 H.position mummyBody $= initPosition
+                H.collisionType mummyFeetShape $= mummyCollisionType
+                H.collisionType mummyBodyShape $= mummyCollisionType
+                H.shapeFilter mummyFeetShape $= aiInvisibleFilter
+                H.shapeFilter mummyBodyShape $= aiInvisibleFilter
 
                 mummyEntityInstance <- withCString "Mummy" $ Spriter.modelGetNewEntityInstance mummySpriterModel
                 withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation mummyEntityInstance
@@ -158,6 +174,8 @@ initLevel imgloader renderf levelData = do
 
     H.position playerBody $= playerStartPosition levelData
     H.collisionType playerFeetShape $= playerFeetCollisionType
+
+    putStrLn "Loaded level"
 
     return LevelLoadedData
         { playerPhysicsRefs = playerRefs
@@ -366,21 +384,6 @@ main = do
                     liftIO onComplete
                     when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
 
-                --currentMummySurfaceVel <- hSample $ mummySurfaceVel logicOutput
-                --H.surfaceVel mummyFeetShape $= currentMummySurfaceVel
-
-                -- let spriterTimeStep = realToFrac $ dt * 1000
-                -- liftIO $ do
-                --     Spriter.setEntityInstanceTimeElapsed playerEntityInstance spriterTimeStep
-                --     Spriter.setEntityInstanceTimeElapsed mummyEntityInstance spriterTimeStep
-
-                --currentMummyPos <- get $ H.position mummyBody
-                --setMummyPos currentMummyPos
-                -- liftIO $ forM_ (aiPhysicsRefs levelLoaded) $ \((shape, _), _, setPosition) -> do
-                --     body <- get $ H.shapeBody shape
-                --     position <- get $ H.position body
-                --     setPosition position
-
                 renderables <- hSample $ renderCommands logicOutput
                 cameraCenterPos <- hSample $ cameraCenterPosition logicOutput
 
@@ -424,11 +427,11 @@ renderSprite textureRenderer spritePtr spriteStatePtr = do
 
     textureInfo <- SDL.queryTexture $ sprite ^. Spriter.spriteTexture
     -- TODO: alpha is not used
-    let w = fromIntegral $ SDL.textureWidth textureInfo
+    let wallShape = fromIntegral $ SDL.textureWidth textureInfo
         h = fromIntegral $ SDL.textureHeight textureInfo
         scaleX = spriteState ^. Spriter.spriteStateScale . Spriter.pointX
         scaleY = spriteState ^. Spriter.spriteStateScale . Spriter.pointY
-        sw = floor $ scaleX * w
+        sw = floor $ scaleX * wallShape
         sh = floor $ scaleY * h
         px = floor $ (sprite ^. Spriter.spritePivotX) * fromIntegral sw
         py = floor $ (sprite ^. Spriter.spritePivotY) * fromIntegral sh
