@@ -316,8 +316,27 @@ debugRenderCharacter debugSettings renderFeetAndBody renderSideChecks = do
              (False, True) -> renderSideChecks
              (True, True) -> renderFeetAndBody <> renderSideChecks
 
+attackEffect :: Ptr H.Space -> H.Vector -> Direction -> H.CpFloat -> (Ptr H.Shape -> Ptr H.Body -> IO Bool) -> IO Bool
+attackEffect space pos dir imp onHit = do
+    let (pkc1, pkc2) = case dir of
+            DRight -> playerKickCheckR
+            DLeft -> playerKickCheckL
+        attackVec = case dir of
+            DRight -> H.Vector imp (-imp)
+            DLeft -> H.Vector (-imp) (-imp)
+
+    hitShapeInfo <- queryLineSeg space (pos + pkc1, pos + pkc2) groundCheckFilter
+
+    let hitShape = H.segQueryInfoShape hitShapeInfo
+    if hitShape /= nullPtr then do
+        hitBody <- get $ H.shapeBody hitShape
+        H.applyImpulse hitBody attackVec H.zero
+        onHit hitShape hitBody
+    else
+        return False
 
 aiCharacterNetwork :: forall t m. MonadGame t m =>
+    Time.UTCTime ->
     Ptr H.Space ->
     Ptr H.Body ->
     Event t TickInfo ->
@@ -327,7 +346,7 @@ aiCharacterNetwork :: forall t m. MonadGame t m =>
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t)
-aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (feetShape, bodyShape) sprite = do
+aiCharacterNetwork startTime space playerBody aiTick playerPosition debugSettings pos (feetShape, bodyShape) sprite = do
     let speedForAnim "Run" = playerSpeed / 3
         speedForAnim _ = playerSpeed / 6
 
@@ -345,6 +364,25 @@ aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (fee
             )
 
         playerBodyPosition = playerPosition - pure (H.Vector 0 15)
+
+        checkSide col =
+            let shape = H.segQueryInfoShape col
+            in if shape == nullPtr then
+                   return Nothing
+               else
+                   (\b -> if b == playerBody then Just () else Nothing) <$> get (H.shapeBody shape)
+
+        clock = clockLossy (1/60) startTime
+
+        mummyPunchEffect :: H.Vector -> Direction -> Performable m Bool
+        mummyPunchEffect position dir =
+            liftIO $ attackEffect space position dir 500
+                (\_ hitBody ->
+                     if hitBody == playerBody then
+                         putStrLn "punched player" >> return True
+                     else
+                         return False)
+
 
     --body <- get $ H.shapeBody feetShape
 
@@ -415,12 +453,54 @@ aiCharacterNetwork space playerBody aiTick playerPosition debugSettings pos (fee
 
         colResults <- performEvent $ liftIO <$> (doAiCollisionChecks <$> pos <@ aiTick)
 
-        mummyAiState <- foldDynM runAiLogic (AiStay, "Idle") colResults
-        let mummyWalkDirection = fst <$> mummyAiState
-        mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection $ updated mummyWalkDirection
+        let checkForHitPossibility canSeePlayer dir (_, _, colRight, colLeft) = liftIO $
+                if not canSeePlayer then
+                    return Nothing
+                else
+                    case dir of
+                        DLeft -> checkSide colLeft
+                        DRight -> checkSide colRight
 
-    let mummyAnimation = current $ snd <$> mummyAiState
-        mummySurfaceVelocity = mummySpeed <$> current mummyWalkDirection <*> mummyAnimation
+        eHitChecks <- performEvent $
+            checkForHitPossibility <$> mummySeesPlayer <*> mummyDisplayDir <@> colResults
+        let eWantsToHitPlayer = fmapMaybe id eHitChecks
+
+        performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ eWantsToHitPlayer
+
+        tickInfo <- current <$> clock
+        let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
+            punchDelay = 0.25
+            punchDuration = 0.6
+
+        latestMummyPunch <- hold Nothing $ Just <$> timeSinceStart <@ eWantsToHitPlayer
+        eDelayedPlayerKick <- delay punchDelay eWantsToHitPlayer
+
+        eHitPlayer <- performEvent $ mummyPunchEffect <$> pos <*> mummyDisplayDir <@ eDelayedPlayerKick
+
+        let isPunching = do
+                t <- timeSinceStart
+                mLatestPunchStart <- latestMummyPunch
+                return $ case mLatestPunchStart of
+                    Nothing -> False
+                    Just latestPunchStart -> t < latestPunchStart + punchDuration
+
+        mummyWalkingState <- foldDynM runAiLogic (AiStay, "Idle") colResults
+        let mummyAiState = do
+                currentlyPunching <- isPunching
+                return $
+                    if currentlyPunching then
+                        pure (AiStay, "Punch")
+                    else
+                        mummyWalkingState
+
+        let mummyWalkDirectionDyn = fmap fst <$> mummyAiState
+            eMummyWalkDirection = switch $ updated <$> mummyWalkDirectionDyn
+            mummyWalkDirection = join $ current <$> mummyWalkDirectionDyn
+
+        mummyDisplayDir <- hold DRight $ fmapMaybe aiDirToDirection eMummyWalkDirection
+
+    let mummyAnimation = join $ fmap current $ fmap snd <$> mummyAiState
+        mummySurfaceVelocity = mummySpeed <$> mummyWalkDirection <*> mummyAnimation
 
     let aiAnimation = do
             aiCurrentPosition <- pos
@@ -529,22 +609,13 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debu
 
         jump imp = liftIO $ H.applyImpulse body (H.Vector 0 imp) H.zero
 
-        playerKickEffect :: H.Vector -> Direction -> [Ptr H.Body] -> Performable m ()
-        playerKickEffect playerP playerD currentAiBodies = do
-            let (pkc1, pkc2) = case playerD of
-                    DRight -> playerKickCheckR
-                    DLeft -> playerKickCheckL
-                playerKickVec = case playerD of
-                    DRight -> H.Vector 1000 (-1000)
-                    DLeft -> H.Vector (-1000) (-1000)
-
-            hitShapeInfo <- liftIO $ queryLineSeg space (playerP + pkc1, playerP + pkc2) groundCheckFilter
-
-            let hitShape = H.segQueryInfoShape hitShapeInfo
-            when (hitShape /= nullPtr) $ do
-                hitBody <- get $ H.shapeBody hitShape
-                liftIO $ H.applyImpulse hitBody playerKickVec H.zero
-                when (hitBody `elem` currentAiBodies) $ liftIO $ putStrLn "Kicked mummy"
+        playerKickEffect :: H.Vector -> Direction -> [Ptr H.Body] -> Performable m Bool
+        playerKickEffect playerP playerD currentAiBodies =
+            liftIO $ attackEffect space playerP playerD 1000
+                (\_ hitBody -> if hitBody `elem` currentAiBodies then
+                        putStrLn "Kicked mummy" >> return True
+                    else
+                        return False)
 
     ePollInput <- tickLossy (1/15) startTime
     eCurrentInput <- performEvent $ pollInput mGamepad <$ ePollInput
@@ -590,7 +661,7 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debu
         ]
 
     performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ ePlayerKick
-    performEvent_ $ playerKickEffect <$> pos <*> playerDir <*> aiBodies <@ eDelayedPlayerKick
+    hitEnemy <- performEvent $ playerKickEffect <$> pos <*> playerDir <*> aiBodies <@ eDelayedPlayerKick
 
     performEvent_ $ jump <$> jumpEvent
 
@@ -754,7 +825,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         aiCharacters <-
             mapM
                 (\(pos, shapes, sprite) ->
-                     aiCharacterNetwork space playerBody aiTick playerPosition debugRenderSettings pos shapes sprite)
+                     aiCharacterNetwork startTime space playerBody aiTick playerPosition debugRenderSettings pos shapes sprite)
                 [(head <$> aiPositions, head aiShapes, head aiSprites)]
 
         eSteppedPhysics <- performEvent $ stepPhysics
