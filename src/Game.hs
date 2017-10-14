@@ -101,6 +101,18 @@ particleAlive gameTime particle =
     let livedTime = gameTime - particleStartTime particle
     in livedTime < particleLifetime particle
 
+createWall :: Ptr H.Space -> (H.Vector, H.Vector) -> IO (Ptr H.Shape, H.ShapeType)
+createWall space (start, end) = do
+    wallBody <- H.spaceGetStaticBody space
+    let wst = H.LineSegment start end 1
+    wallShape <- H.newShape wallBody wst
+    H.collisionType wallShape $= wallCollisionType
+    H.shapeFilter wallShape $= groundCheckFilter
+    H.friction wallShape $= 1.0
+    H.elasticity wallShape $= 0.6
+    H.spaceAddShape space wallShape
+    return (wallShape, wst)
+
 initLevelNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
     SDL.Renderer ->
@@ -127,6 +139,8 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         ePadButtonPress = select sdlEventFan (JoyButtonEvent 0)
         padFilterButtonPress b = ffilter
             (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) ePadButtonPress
+        ePadAPressed = padFilterButtonPress padButtonA
+        ePadBPressed = padFilterButtonPress padButtonB
         ePadBackPressed = padFilterButtonPress padButtonBack
 
     ePollInput <- tickLossy (1/15) startTime
@@ -252,12 +266,60 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         particles <- hold [] $ flip (:) <$> aliveParticles <@> eNewParticle
         let aliveParticles = (filter . particleAlive) <$> current gameTime <*> particles
 
+    let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
+        dPressed = ($ SDL.ScancodeD) <$> pressedKeys
+        keyMovementX = controlVx 1 <$> aPressed <*> dPressed
+        wPressed = ($ SDL.ScancodeW) <$> pressedKeys
+        sPressed = ($ SDL.ScancodeS) <$> pressedKeys
+        keyMovementY = controlVx 1 <$> wPressed <*> sPressed
+
+        xInput = limit $ fmap leftXAxis gamepadInput + keyMovementX
+        yInput = limit $ fmap leftYAxis gamepadInput + keyMovementY
+
+        editMoveInput = V2 <$> xInput <*> yInput
+
+        eSpacePressed = pressEvent SDL.KeycodeSpace
+        editing = not <$> notEditing
+        eCreateNewWall = gate editing $ leftmost
+            [ () <$ eSpacePressed
+            , () <$ ePadAPressed
+            ]
+
+        cameraBehavior True = return $ H.toV2 <$> playerPosition
+        cameraBehavior False = do
+            startPos <- H.toV2 <$> sample playerPosition
+            let deltaMovements = (^*) <$> editMoveInput <@>
+                    fmap ((*400) . realToFrac) clockDiffs
+            movement <- foldDyn (+) (V2 0 0) deltaMovements
+            return $ pure startPos + current movement
+
+    cameraPosition <- switcher
+        (H.toV2 <$> playerPosition)
+        (pushAlways cameraBehavior $ updated dynNotEditing)
+
+    newWallPos <- hold Nothing $ leftmost
+        [ Nothing <$ updated dynNotEditing
+        , Nothing <$ ePadBPressed
+        , Just <$> cameraPosition <@ eCreateNewWall
+        ]
+
+    let maybeSpawnWall () = do
+            mWPos <- sample newWallPos
+            camPos <- sample cameraPosition
+            case mWPos of
+                Nothing -> return Nothing
+                Just p -> return $ Just $ liftIO $ createWall space (H.fromV2 p, H.fromV2 camPos)
+
+    eNewCreatedWall <- performEvent $ push maybeSpawnWall eCreateNewWall
+
+    miscRefs <- current <$> foldDyn (:) (extraPhysicsRefs levelLoaded) eNewCreatedWall
+
     let renderShapes = do
             dbgRender <- debugRendering
-            if dbgRender then
-                return $ uncurry Shape <$> extraPhysicsRefs levelLoaded
-            else
-                return []
+            currentMiscRefs <- miscRefs
+            if dbgRender
+                then return (uncurry Shape <$> currentMiscRefs)
+                else return []
 
         renderJetpack = do
             pos <- jetpackPosition
@@ -276,16 +338,25 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             forM (particleState currentTime <$> pars) $ \(pos, angle) ->
                 return $ StaticSprite particleTex pos angle
 
-    let padLeftState = V2 <$> fmap leftXAxis gamepadInput <*> fmap leftYAxis gamepadInput
+        renderCrosshair = do
+            p <- cameraPosition
+            let xoff = V2 5 0
+                yoff = V2 0 5
+            return
+                [ Line white (p + xoff) (p - xoff)
+                , Line white (p + yoff) (p - yoff)
+                ]
 
-        cameraBehavior True = return $ H.toV2 <$> playerPosition
-        cameraBehavior False = do
-            startPos <- H.toV2 <$> sample playerPosition
-            let deltaMovements = (^*) <$> padLeftState <@> fmap ((*400) . realToFrac) clockDiffs
-            movement <- foldDyn (+) (V2 0 0) deltaMovements
-            return $ pure startPos + current movement
+        renderNewWall = do
+            mWPos <- newWallPos
+            camPos <- cameraPosition
+            case mWPos of
+                Nothing -> return []
+                Just p -> return [ Line blue p camPos ]
 
-    cameraPosition <- switcher (H.toV2 <$> playerPosition) (pushAlways cameraBehavior $ updated dynNotEditing)
+        renderInterface = bool []
+            <$> renderNewWall <> renderCrosshair
+            <*> editing
 
     return LogicOutput
         { cameraCenterPosition = cameraPosition
@@ -295,5 +366,6 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 <> characterRendering player
                 <> mconcat (fmap characterRendering aiCharacters)
                 <> renderShapes
+                <> renderInterface
         , quit = () <$ pressEvent SDL.KeycodeQ
         }

@@ -121,19 +121,10 @@ initLevel imgloader renderf levelData = do
 
     mummySpriterModel <- withCString "res/mummy/Mummy.scon"
         (Spriter.loadSpriterModel imgloader renderf)
-    wall <- H.spaceGetStaticBody space
 
     putStrLn "Creating walls"
 
-    wallShapes <- forM (wallEdges levelData) $ \(start, end) -> do
-        let wst = H.LineSegment start end 1
-        wallShape <- H.newShape wall wst
-        H.collisionType wallShape $= wallCollisionType
-        H.shapeFilter wallShape $= groundCheckFilter
-        H.friction wallShape $= 1.0
-        H.elasticity wallShape $= 0.6
-        H.spaceAddShape space wallShape
-        return (wallShape, wst)
+    wallShapes <- forM (wallEdges levelData) $ createWall space
 
     putStrLn "Creating misc objects"
 

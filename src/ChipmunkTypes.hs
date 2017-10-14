@@ -28,6 +28,7 @@ module ChipmunkTypes
     , scale
     , len
     , toV2
+    , fromV2
     ) where
 
 import qualified Data.Aeson as Aeson
@@ -56,6 +57,9 @@ instance Num Vector where
 
 toV2 :: Vector -> V2 CDouble
 toV2 (Vector x y) = V2 x y
+
+fromV2 :: V2 CDouble -> Vector
+fromV2 (V2 x y) = Vector x y
 
 len :: Vector -> CpFloat
 len (Vector dx dy) = sqrt $ dx*dx + dy*dy
