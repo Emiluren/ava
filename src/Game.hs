@@ -13,7 +13,7 @@ import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
 
 import Foreign.C.Types (CDouble(..))
-import Foreign.Ptr (Ptr)
+import Foreign.Ptr (Ptr, nullPtr)
 
 import Linear (V2(..), (*^), (^*))
 
@@ -138,6 +138,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         eF1Pressed = pressEvent SDL.KeycodeF1
         eF2Pressed = pressEvent SDL.KeycodeF2
         eF3Pressed = pressEvent SDL.KeycodeF3
+        eBackspacePressed = pressEvent SDL.KeycodeBackspace
         eEscPressed = pressEvent SDL.KeycodeEscape
 
         ePadButtonPress = select sdlEventFan (JoyButtonEvent 0)
@@ -145,6 +146,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) ePadButtonPress
         ePadAPressed = padFilterButtonPress padButtonA
         ePadBPressed = padFilterButtonPress padButtonB
+        ePadLTPressed = padFilterButtonPress padTriggerLeft
         ePadBackPressed = padFilterButtonPress padButtonBack
 
     ePollInput <- tickLossy (1/15) startTime
@@ -154,7 +156,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
-    dynNotEditing <- toggle True (mconcat [ () <$ eEscPressed, () <$ ePadBackPressed ])
+    dynNotEditing <- toggle True $ mconcat [ () <$ eBackspacePressed, () <$ ePadBackPressed ]
 
     let notEditing = current dynNotEditing
 
@@ -287,29 +289,47 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
         eSpacePressed = pressEvent SDL.KeycodeSpace
         eSPressed = pressEvent SDL.KeycodeS
+        eUPressed = pressEvent SDL.KeycodeU
         editing = not <$> notEditing
         eCreateNewWall = gate editing $ leftmost
             [ () <$ eSpacePressed
             , () <$ ePadAPressed
             ]
 
-        cameraBehavior True = return $ H.toV2 <$> playerPosition
-        cameraBehavior False = do
-            startPos <- H.toV2 <$> sample playerPosition
+        eSnapToShape = gate editing $ leftmost
+            [ () <$ eUPressed
+            , () <$ ePadLTPressed
+            ]
+
+        cameraBehavior _ True = return $ H.toV2 <$> playerPosition
+        cameraBehavior startPos False = do
+            p <- sample startPos
             let deltaMovements = (^*) <$> editMoveInput <@>
                     fmap ((*400) . realToFrac) clockDiffs
             movement <- foldDyn (+) (V2 0 0) deltaMovements
-            return $ pure startPos + current movement
+            return $ pure p + current movement
+
+        findClosestShape point = liftIO $ do
+            pointQueryInfo <- H.spacePointQueryNearest space (H.fromV2 point) 20 groundCheckFilter
+            let closestShape = H.pointQueryInfoShape pointQueryInfo
+            if closestShape == nullPtr
+                then return Nothing
+                else return $ Just $ H.toV2 $ H.pointQueryInfoPoint pointQueryInfo
+
+    rec
+        eSnapPos <- fmapMaybe id <$> performEvent (findClosestShape <$> cameraPosition <@ eSnapToShape)
+
+        cameraPosition <- switcher (H.toV2 <$> playerPosition) $ leftmost
+            [ pushAlways (cameraBehavior $ fmap H.toV2 playerPosition) (updated dynNotEditing)
+            , pushAlways (\p -> cameraBehavior (pure p) False) eSnapPos
+            ]
 
     eSaveLevel <- ffilter id <$> performEvent (ctrlPressed <$ gate editing eSPressed)
-
-    cameraPosition <- switcher
-        (H.toV2 <$> playerPosition)
-        (pushAlways cameraBehavior $ updated dynNotEditing)
 
     newWallPos <- hold Nothing $ leftmost
         [ Nothing <$ updated dynNotEditing
         , Nothing <$ ePadBPressed
+        , Nothing <$ eEscPressed
         , Just <$> cameraPosition <@ eCreateNewWall
         ]
 

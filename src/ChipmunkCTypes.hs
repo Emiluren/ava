@@ -56,4 +56,5 @@ chipmunkTypeTable = Map.fromList
     , (TypeName "cpBool", [t| Bool |])
     , (TypeName "cpArbiter", [t| Arbiter |])
     , (TypeName "cpSegmentQueryInfo", [t| SegmentQueryInfo |])
+    , (TypeName "cpPointQueryInfo", [t| PointQueryInfo |])
     ]

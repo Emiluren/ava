@@ -6,6 +6,7 @@ module ChipmunkTypes
     , CpBitmask
     , Vector(..)
     , SegmentQueryInfo(..)
+    , PointQueryInfo(..)
     , ShapeFilter(..)
     , Space
     , Body
@@ -89,10 +90,21 @@ data SegmentQueryInfo = SegmentQueryInfo
     , segQueryInfoAlpha :: CpFloat
     } deriving Show
 
+data PointQueryInfo = PointQueryInfo
+    { pointQueryInfoShape :: Ptr Shape
+    , pointQueryInfoPoint :: Vector
+    , pointQueryInfoDistance :: CpFloat
+    , pointQueryInfoGradient :: Vector
+    }
+
 pointOffset, normalOffset, alphaOffset :: Int
 pointOffset = sizeOf (undefined :: Ptr Shape)
 normalOffset = pointOffset + sizeOf (undefined :: Vector)
 alphaOffset = normalOffset + sizeOf (undefined :: Vector)
+
+distanceOffset, gradientOffset :: Int
+distanceOffset = pointOffset + sizeOf (undefined :: Vector)
+gradientOffset = distanceOffset + sizeOf (undefined :: CpFloat)
 
 instance Storable SegmentQueryInfo where
     sizeOf _ = sizeOf (undefined :: Ptr Shape) +
@@ -109,6 +121,22 @@ instance Storable SegmentQueryInfo where
         >> pokeByteOff ptr pointOffset point
         >> pokeByteOff ptr normalOffset normal
         >> pokeByteOff ptr alphaOffset alpha
+
+instance Storable PointQueryInfo where
+    sizeOf _ = sizeOf (undefined :: Ptr Shape) +
+               2 * sizeOf (undefined :: Vector) +
+               sizeOf (undefined :: CpFloat)
+    alignment _ = alignment (undefined :: Vector)
+    peek ptr = PointQueryInfo
+        <$> peekByteOff ptr 0
+        <*> peekByteOff ptr pointOffset
+        <*> peekByteOff ptr distanceOffset
+        <*> peekByteOff ptr gradientOffset
+    poke ptr (PointQueryInfo shape point dist grad) =
+        pokeByteOff ptr 0 shape
+        >> pokeByteOff ptr pointOffset point
+        >> pokeByteOff ptr distanceOffset dist
+        >> pokeByteOff ptr gradientOffset grad
 
 data ShapeFilter = ShapeFilter
     -- Two objects with the same non-zero group value do not collide.
@@ -128,7 +156,8 @@ filterMaskOffset = filterMaskOffset + sizeOf (undefined :: CpBitmask)
 
 -- TODO: program crashes with message <<loop>> when this is used
 instance Storable ShapeFilter where
-    sizeOf _ = sizeOf (undefined :: CpGroup) + 2 * sizeOf (undefined :: CpBitmask)
+    sizeOf _ = sizeOf (undefined :: CpGroup) +
+               2 * sizeOf (undefined :: CpBitmask)
     alignment _ = alignment (undefined :: CpBitmask)
     peek ptr = ShapeFilter
         <$> peekByteOff ptr 0

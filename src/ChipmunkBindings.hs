@@ -243,6 +243,31 @@ spaceSegmentQueryFirst space start end radius (ShapeFilter group categories mask
 
     return info
 
+spacePointQueryNearest :: Ptr Space -> Vector -> CpFloat -> ShapeFilter -> IO PointQueryInfo
+spacePointQueryNearest space point maxDistance (ShapeFilter group categories mask) = do
+    pointPtr <- malloc
+    infoPtr <- malloc
+
+    poke pointPtr point
+    [C.block| void {
+            cpShapeFilter filter;
+            filter.group = $(unsigned int group);
+            filter.categories = $(unsigned int categories);
+            filter.mask = $(unsigned int mask);
+            cpSpacePointQueryNearest($(cpSpace* space),
+                                     *$(cpVect* pointPtr),
+                                     $(double maxDistance),
+                                     filter,
+                                     $(cpPointQueryInfo* infoPtr));
+    } |]
+
+    info <- peek infoPtr
+
+    free pointPtr
+    free infoPtr
+
+    return info
+
 arbiterGetShapes :: Ptr Arbiter -> IO (Ptr Shape, Ptr Shape)
 arbiterGetShapes arb = do
     s1Ptr <- malloc
