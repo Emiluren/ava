@@ -18,7 +18,7 @@ import Data.Word (Word8)
 import Foreign.C.Types (CUInt, CDouble(..))
 import Foreign.Ptr (Ptr, nullPtr)
 
-import Linear (V2(..), V4(..), (*^))
+import Linear (V2(..), V4(..), (*^), (^*))
 
 import Reflex
 import Reflex.Time
@@ -38,8 +38,9 @@ import qualified SpriterBindings as Spriter
 toV2 :: H.Vector -> V2 CDouble
 toV2 (H.Vector x y) = V2 x y
 
-padButtonX, padButtonA, padButtonY, padButtonBack :: Num a => a
+padButtonA, padButtonB, padButtonX, padButtonY, padButtonBack :: Num a => a
 padButtonA = 0
+padButtonB = 1
 padButtonX = 2
 padButtonY = 3
 padButtonBack = 6
@@ -500,12 +501,14 @@ aiCharacterNetwork startTime space playerBody aiTick gameTime playerPosition deb
 
 data GamepadInput = GamepadInput
     { leftXAxis :: CDouble
+    , leftYAxis :: CDouble
     , yPressed :: Bool
     }
 
 initialInput :: GamepadInput
 initialInput = GamepadInput
     { leftXAxis = 0
+    , leftYAxis = 0
     , yPressed = False
     }
 
@@ -514,21 +517,25 @@ axisValue v = fromIntegral v / 32768
 
 pollInput :: MonadIO m => Maybe SDL.Joystick -> m GamepadInput
 pollInput mGamepad =
-    case mGamepad of
-        Nothing -> return initialInput
-        Just gamepad -> do
-            currentXLeftAxis <- SDL.axisPosition gamepad 0
-            currentYPressed <- SDL.buttonPressed gamepad padButtonY
-            return GamepadInput
-                { leftXAxis = (\v -> if abs v < 0.15 then 0 else v) $ axisValue currentXLeftAxis
-                , yPressed = currentYPressed
-                }
+    let deadzone v = if abs v < 0.15 then 0 else v
+    in case mGamepad of
+           Nothing -> return initialInput
+           Just gamepad -> do
+               currentLeftXAxis <- SDL.axisPosition gamepad 0
+               currentLeftYAxis <- SDL.axisPosition gamepad 1
+               currentYPressed <- SDL.buttonPressed gamepad padButtonY
+               return GamepadInput
+                   { leftXAxis = deadzone $ axisValue currentLeftXAxis
+                   , leftYAxis = deadzone $ axisValue currentLeftYAxis
+                   , yPressed = currentYPressed
+                   }
 
 playerNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
     Ptr H.Space ->
     EventSelector t SdlEventTag ->
     Dynamic t Time.NominalDiffTime ->
+    Behavior t Bool ->
     Behavior t (SDL.Scancode -> Bool) ->
     Behavior t H.Vector ->
     Behavior t Bool ->
@@ -539,14 +546,14 @@ playerNetwork :: forall t m. MonadGame t m =>
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t, Behavior t Bool)
-playerNetwork startTime space sdlEventFan gameTime pressedKeys pos onGround aiBodies debugSettings mGamepad body (feetShape, bodyShape) sprite = do
+playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos onGround aiBodies debugSettings mGamepad body (feetShape, bodyShape) sprite = do
     let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
         eWPressed = pressEvent SDL.KeycodeW
         eKPressed = pressEvent SDL.KeycodeK
-        ePadButtonPress = select sdlEventFan (JoyButtonEvent 0)
-        padAxisMove = select sdlEventFan (JoyAxisEvent 0)
+        ePadButtonPress = gate notEditing $ select sdlEventFan (JoyButtonEvent 0)
+        ePadAxisMove = gate notEditing $ select sdlEventFan (JoyAxisEvent 0)
         padFilterButtonPress b = ffilter
             (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) ePadButtonPress
         ePadAPressed = padFilterButtonPress padButtonA
@@ -555,7 +562,7 @@ playerNetwork startTime space sdlEventFan gameTime pressedKeys pos onGround aiBo
             (\(SDL.JoyAxisEventData _ a v) ->
                  a == padXAxis &&
                 abs (axisValue v) > 0.15)
-            padAxisMove
+            ePadAxisMove
         ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
             <$> ePadNotCenter
 
@@ -576,7 +583,7 @@ playerNetwork startTime space sdlEventFan gameTime pressedKeys pos onGround aiBo
                         return False)
 
     ePollInput <- tickLossy (1/15) startTime
-    eCurrentInput <- performEvent $ pollInput mGamepad <$ ePollInput
+    eCurrentInput <- performEvent $ pollInput mGamepad <$ gate notEditing ePollInput
     gamepadInput <- hold initialInput eCurrentInput
 
     performEvent_ $ liftIO . print <$> ePadButtonPress
@@ -586,6 +593,7 @@ playerNetwork startTime space sdlEventFan gameTime pressedKeys pos onGround aiBo
         iPressed = ($ SDL.ScancodeI) <$> pressedKeys
         playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
         playerAxisMovement = leftXAxis <$> gamepadInput
+        yHeld = yPressed <$> gamepadInput
         playerMovement = limit $ (+) <$> playerKeyMovement <*> playerAxisMovement
         playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
         playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
@@ -612,7 +620,7 @@ playerNetwork startTime space sdlEventFan gameTime pressedKeys pos onGround aiBo
     latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerKick
     eDelayedPlayerKick <- delayInDynTime gameTime kickDelay ePlayerKick
 
-    playerDir <- hold DRight $ leftmost
+    playerDir <- hold DRight $ gate notEditing $ leftmost
         [ DLeft <$ eAPressed
         , DRight <$ eDPressed
         , ePadChangeDir
@@ -626,7 +634,7 @@ playerNetwork startTime space sdlEventFan gameTime pressedKeys pos onGround aiBo
     let playerAnimation =
             pickAnimation <$> playerMoving <*> onGround <*> latestPlayerKick <*> timeSinceStart
         horizontalForce = bool <$> playerAirForce <*> pure H.zero <*> onGround
-        jetpackOn = (||) <$> iPressed <*> fmap yPressed gamepadInput
+        jetpackOn = (||) <$> iPressed <*> yHeld
         verticalForce = bool H.zero (H.Vector 0 $ -6000) <$> jetpackOn
         playerForce = horizontalForce + verticalForce
 
@@ -737,18 +745,24 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) ePadButtonPress
         ePadBackPressed = padFilterButtonPress padButtonBack
 
+    ePollInput <- tickLossy (1/15) startTime
+    eCurrentInput <- performEvent $ pollInput mGamepad <$ ePollInput
+    gamepadInput <- hold initialInput eCurrentInput
+
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
-    notEditing <- toggle True $ mconcat [ () <$ eEscPressed, () <$ ePadBackPressed ]
+    dynNotEditing <- toggle True (mconcat [ () <$ eEscPressed, () <$ ePadBackPressed ])
+
+    let notEditing = current dynNotEditing
 
     playerBody <- get $ H.shapeBody playerFeetShape
     aiBodies <- mapM (get . H.shapeBody) aiFeetShapes
-    aiTick <- gate (current notEditing) <$> tickLossy (1/15) startTime
+    aiTick <- gate notEditing <$> tickLossy (1/15) startTime
 
     clock <- clockLossy (1/60) startTime
     clockDiffs <- mapAccum_ (\t t' -> (t', Time.diffUTCTime t' t) ) startTime $ _tickInfo_lastUTC <$> updated clock
-    gameTime <- foldDyn (+) 0 $ gate (current notEditing) clockDiffs
+    gameTime <- foldDyn (+) 0 $ gate notEditing clockDiffs
 
     let stepPhysics playerSurfaceVel aiSurfaceVels playerForce stepsToRun = liftIO $ do
             H.surfaceVel playerFeetShape $= H.scale playerSurfaceVel (-1)
@@ -780,6 +794,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 space
                 sdlEventFan
                 gameTime
+                notEditing
                 pressedKeys
                 playerPosition
                 playerOnGround
@@ -802,7 +817,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             <$> characterSurfaceVelocity player
             <*> aiSurfaceVelocities
             <*> characterForce player
-            <@> gate (current notEditing) eStepPhysics
+            <@> gate notEditing eStepPhysics
         physicsOutput <- hold initialPhysicsState eSteppedPhysics
 
     let playerEntityInstance = playerSpriterInstance levelLoaded
@@ -811,10 +826,10 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
     eSpriterDiffs <- mapAccum_ (\oldTime newTime -> (newTime, Time.diffUTCTime newTime oldTime))
         startTime $ _tickInfo_lastUTC <$> eSpriterTick
     performEvent_ $ liftIO . Spriter.setEntityInstanceTimeElapsed playerEntityInstance
-        . realToFrac . (*1000) <$> gate (current notEditing) eSpriterDiffs
+        . realToFrac . (*1000) <$> gate notEditing eSpriterDiffs
     forM_ aiSprites $ \aiEntityInstance ->
         performEvent_ $ liftIO . Spriter.setEntityInstanceTimeElapsed aiEntityInstance
-            . realToFrac . (*1000) <$> gate (current notEditing) eSpriterDiffs
+            . realToFrac . (*1000) <$> gate notEditing eSpriterDiffs
 
     jetpackTex <- SDL.Image.loadTexture textureRenderer "res/jetpack.png"
     liftIO $ putStrLn "Loaded: res/jetpack.png"
@@ -832,7 +847,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                     DRight -> V2 (-8) (-25)
             return $ toV2 pos + jetpackOffset
 
-    eSpawnParticleTick <- gate (current notEditing) <$> tickLossy particleSpawnInterval startTime
+    eSpawnParticleTick <- gate notEditing <$> tickLossy particleSpawnInterval startTime
     eParXVel <- zipListWithEvent const particleXVelocities $
         gate jetpackOn eSpawnParticleTick
 
@@ -877,8 +892,19 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             forM (particleState currentTime <$> pars) $ \(pos, angle) ->
                 return $ StaticSprite particleTex pos angle
 
+    let padLeftState = V2 <$> fmap leftXAxis gamepadInput <*> fmap leftYAxis gamepadInput
+
+        cameraBehavior True = return $ toV2 <$> playerPosition
+        cameraBehavior False = do
+            startPos <- toV2 <$> sample playerPosition
+            let deltaMovements = (^*) <$> padLeftState <@> fmap ((*400) . realToFrac) clockDiffs
+            movement <- foldDyn (+) (V2 0 0) deltaMovements
+            return $ pure startPos + current movement
+
+    cameraPosition <- switcher (toV2 <$> playerPosition) (pushAlways cameraBehavior $ updated dynNotEditing)
+
     return LogicOutput
-        { cameraCenterPosition = toV2 . physicsPlayerPosition <$> physicsOutput
+        { cameraCenterPosition = cameraPosition
         , renderCommands =
                 renderParticles
                 <> renderJetpack

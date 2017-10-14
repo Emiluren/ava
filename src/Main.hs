@@ -283,6 +283,9 @@ main = do
                             DRight -> Spriter.setEntityInstanceScale entityInstance $ V2 1 1
                             DLeft -> Spriter.setEntityInstanceScale entityInstance $ V2 (-1) 1
                         Spriter.setEntityInstancePosition entityInstance (position - camOffset)
+
+                        -- Sprite won't be in the right place unless it's updated
+                        Spriter.setEntityInstanceTimeElapsed entityInstance 0
                         Spriter.renderEntityInstance entityInstance
                     StaticSprite texture pos angle -> do
                         textureInfo <- SDL.queryTexture texture
