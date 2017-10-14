@@ -12,12 +12,12 @@ import GHC.Generics
 
 import qualified ChipmunkTypes as H
 
-data EnemyType = Mummy | Zombie deriving (Show, Generic)
+data EnemyType = Mummy | Zombie deriving (Eq, Show, Generic)
 instance ToJSON EnemyType where
     toEncoding = genericToEncoding defaultOptions
 instance FromJSON EnemyType
 
-data ObjectType = Ball | Box deriving (Show, Generic)
+data ObjectType = Ball | Box deriving (Eq, Show, Generic)
 instance ToJSON ObjectType where
     toEncoding = genericToEncoding defaultOptions
 instance FromJSON ObjectType
@@ -27,7 +27,7 @@ data LevelData = LevelData
     , wallEdges :: [(H.Vector, H.Vector)]
     , initEnemies :: [(EnemyType, H.Vector)]
     , extraObjects :: [(ObjectType, H.Vector)]
-    } deriving (Generic, Show)
+    } deriving (Generic, Show, Eq)
 
 instance ToJSON LevelData where
     toEncoding = genericToEncoding defaultOptions

@@ -46,7 +46,7 @@ type CpCollisionType = CUInt
 type CpGroup = CUInt
 type CpBitmask = CUInt
 
-data Vector = Vector { cpVecX :: CpFloat, cpVecY :: CpFloat } deriving (Show, Generic)
+data Vector = Vector { cpVecX :: CpFloat, cpVecY :: CpFloat } deriving (Eq, Show, Generic)
 instance Num Vector where
     (Vector x1 y1) + (Vector x2 y2) = Vector (x1 + x2) (y1 + y2)
     (Vector x1 y1) * (Vector x2 y2) = Vector (x1 * x2) (y1 * y2)

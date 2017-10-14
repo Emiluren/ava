@@ -5,7 +5,9 @@ import Control.Monad (replicateM_)
 import Control.Monad.Identity
 import Control.Monad.IO.Class (liftIO)
 
+import qualified Data.Aeson.Encode.Pretty as Aeson
 import Data.Bool (bool)
+import qualified Data.ByteString.Lazy.Char8 as BS
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
@@ -27,6 +29,7 @@ import qualified ChipmunkBindings as H
 import Characters
 import Graphics
 import Input
+import Level
 import MonadGame
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
@@ -38,7 +41,8 @@ data LogicOutput t = LogicOutput
     }
 
 data LevelLoadedData = LevelLoadedData
-    { playerPhysicsRefs :: CharacterPhysicsRefs
+    { initialData :: LevelData
+    , playerPhysicsRefs :: CharacterPhysicsRefs
     , playerSpriterInstance :: Ptr Spriter.CEntityInstance
     , aiPhysicsRefs :: [(CharacterPhysicsRefs, Ptr Spriter.CEntityInstance)]
     , extraPhysicsRefs :: [(Ptr H.Shape, H.ShapeType)]
@@ -272,6 +276,9 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         wPressed = ($ SDL.ScancodeW) <$> pressedKeys
         sPressed = ($ SDL.ScancodeS) <$> pressedKeys
         keyMovementY = controlVx 1 <$> wPressed <*> sPressed
+        ctrlPressed = do
+            modState <- SDL.getModState
+            return (SDL.keyModifierLeftCtrl modState || SDL.keyModifierRightCtrl modState)
 
         xInput = limit $ fmap leftXAxis gamepadInput + keyMovementX
         yInput = limit $ fmap leftYAxis gamepadInput + keyMovementY
@@ -279,6 +286,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         editMoveInput = V2 <$> xInput <*> yInput
 
         eSpacePressed = pressEvent SDL.KeycodeSpace
+        eSPressed = pressEvent SDL.KeycodeS
         editing = not <$> notEditing
         eCreateNewWall = gate editing $ leftmost
             [ () <$ eSpacePressed
@@ -292,6 +300,8 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                     fmap ((*400) . realToFrac) clockDiffs
             movement <- foldDyn (+) (V2 0 0) deltaMovements
             return $ pure startPos + current movement
+
+    eSaveLevel <- ffilter id <$> performEvent (ctrlPressed <$ gate editing eSPressed)
 
     cameraPosition <- switcher
         (H.toV2 <$> playerPosition)
@@ -308,9 +318,24 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             camPos <- sample cameraPosition
             case mWPos of
                 Nothing -> return Nothing
-                Just p -> return $ Just $ liftIO $ createWall space (H.fromV2 p, H.fromV2 camPos)
+                Just p -> return $ Just (H.fromV2 p, H.fromV2 camPos)
 
-    eNewCreatedWall <- performEvent $ push maybeSpawnWall eCreateNewWall
+        eNewWallEdge = push maybeSpawnWall eCreateNewWall
+
+    eNewCreatedWall <- performEvent $ liftIO . createWall space <$> eNewWallEdge
+
+    let saveLevel levelData = liftIO $ do
+            putStr "File name: ./res/levels/"
+            filename <- ("res/levels/" ++) <$> getLine
+            BS.writeFile filename $ Aeson.encodePretty levelData
+            putStrLn $ filename ++ " was saved"
+
+        addWallToLevelData wall levelData = levelData
+            { wallEdges = wall : wallEdges levelData
+            }
+    currentLevelData <- foldDyn addWallToLevelData (initialData levelLoaded) eNewWallEdge
+
+    performEvent_ $ saveLevel <$> current currentLevelData <@ eSaveLevel
 
     miscRefs <- current <$> foldDyn (:) (extraPhysicsRefs levelLoaded) eNewCreatedWall
 

@@ -1,5 +1,4 @@
-{-# LANGUAGE OverloadedStrings, ScopedTypeVariables, FlexibleContexts, GADTs #-}
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings, GADTs #-}
 module Main where
 
 import qualified Control.Concurrent.Chan as Chan
@@ -10,7 +9,6 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Ref (Ref, MonadRef)
 
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Encode.Pretty as Aeson
 import qualified Data.ByteString.Lazy.Char8 as BS
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
@@ -53,6 +51,8 @@ import SDL (Point(P))
 import qualified SDL
 import qualified SDL.Image
 import qualified SDL.Primitive as SDL
+
+import System.IO (hSetBuffering, BufferMode(NoBuffering), stdout)
 
 import Characters
 import qualified ChipmunkBindings as H
@@ -179,7 +179,8 @@ initLevel imgloader renderf levelData = do
     putStrLn "Loaded level"
 
     return LevelLoadedData
-        { playerPhysicsRefs = playerRefs
+        { initialData = levelData
+        , playerPhysicsRefs = playerRefs
         , playerSpriterInstance = playerEntityInstance
         , aiPhysicsRefs = aiRefs
         , extraPhysicsRefs = wallShapes ++ extraObjectRefs
@@ -224,6 +225,7 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
 
 main :: IO ()
 main = do
+    hSetBuffering stdout NoBuffering
     SDL.initializeAll
 
     let windowSettings = SDL.defaultWindow
