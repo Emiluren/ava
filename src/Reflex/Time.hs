@@ -19,7 +19,8 @@ import Control.Monad.Fix
 import Control.Monad.IO.Class
 import Data.Align
 import Data.Fixed
-import Data.Sequence (Seq, (|>))
+import Data.IORef
+import Data.Sequence (Seq, (|>), (<|), ViewR(..))
 import qualified Data.Sequence as Seq
 import Data.These
 import Data.Time.Clock
@@ -89,6 +90,23 @@ delay :: (PerformEvent t m, TriggerEvent t m, MonadIO (Performable m)) => Nomina
 delay dt e = performEventAsync $ ffor e $ \a cb -> liftIO $ void $ forkIO $ do
   Concurrent.delay $ ceiling $ dt * 1000000
   cb a
+
+-- TODO: Will this cause memory leaks?
+delayInDynTime :: (MonadIO m, PerformEvent t m, TriggerEvent t m, MonadIO (Performable m)) =>
+    Dynamic t NominalDiffTime -> NominalDiffTime -> Event t a -> m (Event t a)
+delayInDynTime time dt e = do
+    bufferRef <- liftIO $ newIORef Seq.empty
+    let eWithT = (,) <$> current time <@> e
+        checkBuffer t = liftIO $ do
+            buffer <- readIORef bufferRef
+            case Seq.viewr buffer of
+                xs :> (t', x, cb) ->
+                    when (t > t') $ writeIORef bufferRef xs >> cb x
+                _ ->
+                    return ()
+    performEvent_ $ checkBuffer <$> updated time
+    performEventAsync $ ffor eWithT $ \(t, a) cb ->
+        liftIO $ modifyIORef' bufferRef ((t + dt, a, cb) <|)
 
 -- | Send events with Poisson timing with the given basis and rate
 --   Each occurence of the resulting event will contain the index of

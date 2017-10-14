@@ -148,6 +148,8 @@ initLevel imgloader renderf levelData = do
                 H.spaceAddShape space circleShape
                 H.position circleBody $= initPosition
                 return (circleShape, circleShapeType)
+            Box ->
+                error "Box creation not implemented!"
 
     putStrLn "Creating player"
 
@@ -173,6 +175,8 @@ initLevel imgloader renderf levelData = do
                 withCString "Idle" $ Spriter.setEntityInstanceCurrentAnimation mummyEntityInstance
 
                 return (mummyRefs, mummyEntityInstance)
+            Zombie ->
+                error "Zombies not implemented!"
 
     H.position playerBody $= playerStartPosition levelData
     H.collisionType playerFeetShape $= playerFeetCollisionType
@@ -200,7 +204,12 @@ mainReflex :: (MonadGame t m) =>
 mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad = do
     eInit <- getPostBuild
 
-    eLevelLoaded <- performEvent $ liftIO (initLevel imgloader renderf testLevel) <$ eInit
+    let loadTestLevel = liftIO $ do
+            Just level <- (Aeson.decode :: BS.ByteString -> Maybe LevelData)
+                <$> BS.readFile "res/levels/testlevel.json"
+            initLevel imgloader renderf level
+
+    eLevelLoaded <- performEvent $ loadTestLevel <$ eInit
 
     let initialOutput = LogicOutput
             { cameraCenterPosition = pure $ V2 0 0

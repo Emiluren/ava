@@ -15,7 +15,7 @@ import qualified Data.Time.Clock as Time
 import qualified Data.Vector.Storable as V
 import Data.Word (Word8)
 
-import Foreign.C.Types (CInt, CUInt, CDouble(..))
+import Foreign.C.Types (CUInt, CDouble(..))
 import Foreign.Ptr (Ptr, nullPtr)
 
 import Linear (V2(..), V4(..), (*^))
@@ -23,7 +23,6 @@ import Linear (V2(..), V4(..), (*^))
 import Reflex
 import Reflex.Time
 
-import SDL (Point(P))
 import qualified SDL
 import qualified SDL.Raw.Types as SDL (JoystickID)
 import qualified SDL.Image
@@ -32,8 +31,6 @@ import System.Random (newStdGen, randomRs)
 
 import qualified ChipmunkBindings as H
 
-import Level
-
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
 
@@ -41,10 +38,11 @@ import qualified SpriterBindings as Spriter
 toV2 :: H.Vector -> V2 CDouble
 toV2 (H.Vector x y) = V2 x y
 
-padButtonX, padButtonA, padButtonY :: Num a => a
+padButtonX, padButtonA, padButtonY, padButtonBack :: Num a => a
 padButtonA = 0
 padButtonX = 2
 padButtonY = 3
+padButtonBack = 6
 
 padXAxis :: Word8
 padXAxis = 0
@@ -298,13 +296,14 @@ aiCharacterNetwork :: forall t m. MonadGame t m =>
     Ptr H.Space ->
     Ptr H.Body ->
     Event t TickInfo ->
+    Dynamic t Time.NominalDiffTime ->
     Behavior t H.Vector ->
     Behavior t DebugRenderSettings ->
     Behavior t H.Vector ->
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t)
-aiCharacterNetwork startTime space playerBody aiTick playerPosition debugSettings pos (feetShape, bodyShape) sprite = do
+aiCharacterNetwork startTime space playerBody aiTick gameTime playerPosition debugSettings pos (feetShape, bodyShape) sprite = do
     let speedForAnim "Run" = playerSpeed / 3
         speedForAnim _ = playerSpeed / 6
 
@@ -431,9 +430,9 @@ aiCharacterNetwork startTime space playerBody aiTick playerPosition debugSetting
             punchDuration = 0.6
 
         latestMummyPunch <- hold Nothing $ Just <$> timeSinceStart <@ eWantsToHitPlayer
-        eDelayedPlayerKick <- delay punchDelay eWantsToHitPlayer
+        eDelayedMummyPunch <- delayInDynTime gameTime punchDelay eWantsToHitPlayer
 
-        eHitPlayer <- performEvent $ mummyPunchEffect <$> pos <*> mummyDisplayDir <@ eDelayedPlayerKick
+        eHitPlayer <- performEvent $ mummyPunchEffect <$> pos <*> mummyDisplayDir <@ eDelayedMummyPunch
 
         let isPunching = do
                 t <- timeSinceStart
@@ -529,6 +528,7 @@ playerNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
     Ptr H.Space ->
     EventSelector t SdlEventTag ->
+    Dynamic t Time.NominalDiffTime ->
     Behavior t (SDL.Scancode -> Bool) ->
     Behavior t H.Vector ->
     Behavior t Bool ->
@@ -539,16 +539,16 @@ playerNetwork :: forall t m. MonadGame t m =>
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t, Behavior t Bool)
-playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debugSettings mGamepad body (feetShape, bodyShape) sprite = do
+playerNetwork startTime space sdlEventFan gameTime pressedKeys pos onGround aiBodies debugSettings mGamepad body (feetShape, bodyShape) sprite = do
     let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
         eWPressed = pressEvent SDL.KeycodeW
         eKPressed = pressEvent SDL.KeycodeK
-        padButtonPress = select sdlEventFan (JoyButtonEvent 0)
+        ePadButtonPress = select sdlEventFan (JoyButtonEvent 0)
         padAxisMove = select sdlEventFan (JoyAxisEvent 0)
         padFilterButtonPress b = ffilter
-            (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) padButtonPress
+            (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) ePadButtonPress
         ePadAPressed = padFilterButtonPress padButtonA
         ePadXPressed = padFilterButtonPress padButtonX
         ePadNotCenter = ffilter
@@ -579,7 +579,7 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debu
     eCurrentInput <- performEvent $ pollInput mGamepad <$ ePollInput
     gamepadInput <- hold initialInput eCurrentInput
 
-    performEvent_ $ liftIO . print <$> padButtonPress
+    performEvent_ $ liftIO . print <$> ePadButtonPress
 
     let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
         dPressed = ($ SDL.ScancodeD) <$> pressedKeys
@@ -610,7 +610,7 @@ playerNetwork startTime space sdlEventFan pressedKeys pos onGround aiBodies debu
     let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
 
     latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerKick
-    eDelayedPlayerKick <- delay kickDelay ePlayerKick
+    eDelayedPlayerKick <- delayInDynTime gameTime kickDelay ePlayerKick
 
     playerDir <- hold DRight $ leftmost
         [ DLeft <$ eAPressed
@@ -692,21 +692,21 @@ particleSpawnInterval = 0.02
 data Particle = Particle
     { particleVelocity :: V2 CDouble
     , particleAngularVel :: CDouble
-    , particleStartTime :: Time.UTCTime
+    , particleStartTime :: Time.NominalDiffTime
     , particleLifetime :: Time.NominalDiffTime
     , particleStartPos :: V2 CDouble
     } deriving Show
 
-particleState :: Time.UTCTime -> Particle -> (V2 CDouble, CDouble)
-particleState time particle =
-    let livedTime = Time.diffUTCTime time (particleStartTime particle)
+particleState :: Time.NominalDiffTime -> Particle -> (V2 CDouble, CDouble)
+particleState gameTime particle =
+    let livedTime = gameTime - particleStartTime particle
     in ( particleStartPos particle + realToFrac livedTime *^ particleVelocity particle
        , particleAngularVel particle * realToFrac livedTime
        )
 
-particleAlive :: Time.UTCTime -> Particle -> Bool
-particleAlive time particle =
-    let livedTime = Time.diffUTCTime time (particleStartTime particle)
+particleAlive :: Time.NominalDiffTime -> Particle -> Bool
+particleAlive gameTime particle =
+    let livedTime = gameTime - particleStartTime particle
     in livedTime < particleLifetime particle
 
 initLevelNetwork :: forall t m. MonadGame t m =>
@@ -726,9 +726,29 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         aiFeetShapes = fst <$> aiShapes
         aiSprites = snd <$> aiShapesAndSprites
 
+        pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
+        eF1Pressed = pressEvent SDL.KeycodeF1
+        eF2Pressed = pressEvent SDL.KeycodeF2
+        eF3Pressed = pressEvent SDL.KeycodeF3
+        eEscPressed = pressEvent SDL.KeycodeEscape
+
+        ePadButtonPress = select sdlEventFan (JoyButtonEvent 0)
+        padFilterButtonPress b = ffilter
+            (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) ePadButtonPress
+        ePadBackPressed = padFilterButtonPress padButtonBack
+
+    debugRendering <- current <$> toggle True eF1Pressed
+    characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
+    colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
+    notEditing <- toggle True $ mconcat [ () <$ eEscPressed, () <$ ePadBackPressed ]
+
     playerBody <- get $ H.shapeBody playerFeetShape
     aiBodies <- mapM (get . H.shapeBody) aiFeetShapes
-    aiTick <- tickLossy (1/15) startTime
+    aiTick <- gate (current notEditing) <$> tickLossy (1/15) startTime
+
+    clock <- clockLossy (1/60) startTime
+    clockDiffs <- mapAccum_ (\t t' -> (t', Time.diffUTCTime t' t) ) startTime $ _tickInfo_lastUTC <$> updated clock
+    gameTime <- foldDyn (+) 0 $ gate (current notEditing) clockDiffs
 
     let stepPhysics playerSurfaceVel aiSurfaceVels playerForce stepsToRun = liftIO $ do
             H.surfaceVel playerFeetShape $= H.scale playerSurfaceVel (-1)
@@ -741,15 +761,6 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             samplePhysics playerBody aiBodies
 
     initialPhysicsState <- liftIO $ samplePhysics playerBody aiBodies
-
-    let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
-        eF1Pressed = pressEvent SDL.KeycodeF1
-        eF2Pressed = pressEvent SDL.KeycodeF2
-        eF3Pressed = pressEvent SDL.KeycodeF3
-
-    debugRendering <- current <$> toggle True eF1Pressed
-    characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
-    colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
 
     let debugRenderSettings = DebugRenderSettings
             <$> debugRendering
@@ -768,6 +779,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 startTime
                 space
                 sdlEventFan
+                gameTime
                 pressedKeys
                 playerPosition
                 playerOnGround
@@ -783,14 +795,14 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         aiCharacters <-
             mapM
                 (\(pos, shapes, sprite) ->
-                     aiCharacterNetwork startTime space playerBody aiTick playerPosition debugRenderSettings pos shapes sprite)
+                     aiCharacterNetwork startTime space playerBody aiTick gameTime playerPosition debugRenderSettings pos shapes sprite)
                 [(head <$> aiPositions, head aiShapes, head aiSprites)]
 
         eSteppedPhysics <- performEvent $ stepPhysics
             <$> characterSurfaceVelocity player
             <*> aiSurfaceVelocities
             <*> characterForce player
-            <@> eStepPhysics
+            <@> gate (current notEditing) eStepPhysics
         physicsOutput <- hold initialPhysicsState eSteppedPhysics
 
     let playerEntityInstance = playerSpriterInstance levelLoaded
@@ -799,23 +811,19 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
     eSpriterDiffs <- mapAccum_ (\oldTime newTime -> (newTime, Time.diffUTCTime newTime oldTime))
         startTime $ _tickInfo_lastUTC <$> eSpriterTick
     performEvent_ $ liftIO . Spriter.setEntityInstanceTimeElapsed playerEntityInstance
-        . realToFrac . (*1000) <$> eSpriterDiffs
+        . realToFrac . (*1000) <$> gate (current notEditing) eSpriterDiffs
     forM_ aiSprites $ \aiEntityInstance ->
         performEvent_ $ liftIO . Spriter.setEntityInstanceTimeElapsed aiEntityInstance
-            . realToFrac . (*1000) <$> eSpriterDiffs
+            . realToFrac . (*1000) <$> gate (current notEditing) eSpriterDiffs
 
     jetpackTex <- SDL.Image.loadTexture textureRenderer "res/jetpack.png"
     liftIO $ putStrLn "Loaded: res/jetpack.png"
     particleTex <- SDL.Image.loadTexture textureRenderer "res/jetpack particle.png"
     liftIO $ putStrLn "Loaded: res/jetpack particle.png"
 
-    let clock = clockLossy (1/60) startTime
-
-    tickInfo <- current <$> clock
     stdGen <- liftIO newStdGen
 
-    let time = _tickInfo_lastUTC <$> tickInfo
-        particleXVelocities = randomRs (-20, 20) stdGen
+    let particleXVelocities = randomRs (-20, 20) stdGen
         jetpackPosition = do
             pos <- playerPosition
             dir <- characterDirection player
@@ -824,15 +832,14 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                     DRight -> V2 (-8) (-25)
             return $ toV2 pos + jetpackOffset
 
-
-    eSpawnParticleTick <- tickLossy particleSpawnInterval startTime
+    eSpawnParticleTick <- gate (current notEditing) <$> tickLossy particleSpawnInterval startTime
     eParXVel <- zipListWithEvent const particleXVelocities $
         gate jetpackOn eSpawnParticleTick
 
     let spawnParticle xv = do
             playerV <- sample playerVelocity
             pos <- sample jetpackPosition
-            t <- sample time
+            t <- sample $ current gameTime
             return Particle
                 { particleVelocity = toV2 playerV + V2 xv 200
                 , particleAngularVel = xv
@@ -844,7 +851,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
     rec
         particles <- hold [] $ flip (:) <$> aliveParticles <@> eNewParticle
-        let aliveParticles = (filter . particleAlive) <$> time <*> particles
+        let aliveParticles = (filter . particleAlive) <$> current gameTime <*> particles
 
     let renderShapes = do
             dbgRender <- debugRendering
@@ -866,7 +873,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
         renderParticles = do
             pars <- aliveParticles
-            currentTime <- time
+            currentTime <- current gameTime
             forM (particleState currentTime <$> pars) $ \(pos, angle) ->
                 return $ StaticSprite particleTex pos angle
 
