@@ -54,8 +54,12 @@ import qualified SDL
 import qualified SDL.Image
 import qualified SDL.Primitive as SDL
 
+import Characters
 import qualified ChipmunkBindings as H
 import Game
+import Graphics
+import Input
+import MonadGame
 import Level
 
 import qualified SpriterTypes as Spriter

@@ -16,12 +16,16 @@ extra-source-files:  README.md
 executable ava
   hs-source-dirs:      src
   main-is:             Main.hs
-  other-modules:       ChipmunkBindings
+  other-modules:       Characters
+                     , ChipmunkBindings
                      , ChipmunkCTypes
                      , ChipmunkTypes
                      , Game
+                     , Graphics
+                     , Input
                      , Instances
                      , Level
+                     , MonadGame
                      , Reflex.Time
                      , SpriterBindings
                      , SpriterTypes

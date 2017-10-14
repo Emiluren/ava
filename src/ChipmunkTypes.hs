@@ -27,6 +27,7 @@ module ChipmunkTypes
 
     , scale
     , len
+    , toV2
     ) where
 
 import qualified Data.Aeson as Aeson
@@ -35,6 +36,7 @@ import Foreign.C.Types (CDouble, CUInt)
 import Foreign.Storable
 import Foreign.Ptr (Ptr, FunPtr)
 import GHC.Generics
+import Linear (V2(..))
 
 import Instances ()
 
@@ -52,8 +54,14 @@ instance Num Vector where
     fromInteger x = Vector (fromInteger x) (fromInteger x)
     negate (Vector x y) = Vector (-x) (-y)
 
+toV2 :: Vector -> V2 CDouble
+toV2 (Vector x y) = V2 x y
+
 len :: Vector -> CpFloat
 len (Vector dx dy) = sqrt $ dx*dx + dy*dy
+
+scale :: Vector -> CpFloat -> Vector
+scale (Vector x y) s = Vector (x * s) (y * s)
 
 instance Storable Vector where
     sizeOf _ = 2 * sizeOf (undefined :: CpFloat)
@@ -126,9 +134,6 @@ instance Storable ShapeFilter where
         pokeByteOff ptr 0 group
         >> pokeByteOff ptr filterCategoriesOffset cat
         >> pokeByteOff ptr filterMaskOffset mask
-
-scale :: Vector -> CpFloat -> Vector
-scale (Vector x y) s = Vector (x * s) (y * s)
 
 data Space
 data Body
