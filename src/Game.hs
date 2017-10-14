@@ -31,7 +31,8 @@ import qualified SDL.Image
 import System.Random (newStdGen, randomRs)
 
 import qualified ChipmunkBindings as H
-import qualified ChipmunkTypes as H
+
+import Level
 
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
@@ -40,10 +41,6 @@ import qualified SpriterBindings as Spriter
 toV2 :: H.Vector -> V2 CDouble
 toV2 (H.Vector x y) = V2 x y
 
-shelfStart, shelfEnd :: Num a => (a, a)
-shelfStart = (100, 200)
-shelfEnd = (300, 320)
-
 padButtonX, padButtonA, padButtonY :: Num a => a
 padButtonA = 0
 padButtonX = 2
@@ -51,18 +48,6 @@ padButtonY = 3
 
 padXAxis :: Word8
 padXAxis = 0
-
-makeHVector :: (CDouble, CDouble) -> H.Vector
-makeHVector = uncurry H.Vector
-
-makeSdlPoint :: Num a => (a, a) -> SDL.Point V2 a
-makeSdlPoint = SDL.P . uncurry SDL.V2
-
-startV, endV :: H.Vector
-(startV, endV) = (makeHVector shelfStart, makeHVector shelfEnd)
-
-startP, endP :: SDL.Point V2 CInt
-(startP, endP) = (makeSdlPoint shelfStart, makeSdlPoint shelfEnd)
 
 circleMass, circleRadius :: Num a => a
 circleMass = 10
@@ -117,17 +102,6 @@ data LogicOutput t = LogicOutput
     { cameraCenterPosition :: Behavior t (V2 CDouble)
     , renderCommands :: Behavior t [Renderable]
     , quit :: Event t ()
-    }
-
-data EnemyType = Mummy
-
-data ObjectType = Ball
-
-data LevelData = LevelData
-    { playerStartPosition :: H.Vector
-    , wallEdges :: [(H.Vector, H.Vector)]
-    , initEnemies :: [(EnemyType, H.Vector)]
-    , extraObjects :: [(ObjectType, H.Vector)]
     }
 
 type CharacterPhysicsRefs = (Ptr H.Shape, Ptr H.Shape)
@@ -206,22 +180,6 @@ makeCharacter space = do
     H.friction characterBodyShape $= 0
 
     return (characterFeetShape, characterBodyShape)
-
-testLevel :: LevelData
-testLevel =
-    let tl = H.Vector 0 0
-        bl = H.Vector 0 400
-        tr = H.Vector 400 0
-        br = H.Vector 400 400
-
-        corners = [tl, H.Vector (-200) (-10), H.Vector (-200) 360, bl, H.Vector 150 380, br, tr]
-        edges = zip corners $ tail corners ++ [head corners]
-    in LevelData
-       { wallEdges = (startV, endV) : edges
-       , playerStartPosition = H.Vector 240 100
-       , initEnemies = [(Mummy, H.Vector 110 200)]
-       , extraObjects = [(Ball, H.Vector 200 20)]
-       }
 
 groundCheckFilter :: H.ShapeFilter
 groundCheckFilter = H.ShapeFilter

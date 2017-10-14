@@ -1,5 +1,9 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
-module ChipmunkBindings where
+module ChipmunkBindings
+    ( module ChipmunkBindings
+    , module ChipmunkTypes
+    , module ChipmunkCTypes
+    ) where
 
 import Control.Monad (replicateM)
 import Data.IORef (newIORef, modifyIORef', readIORef)
@@ -12,6 +16,7 @@ import qualified Language.C.Inline as C
 import System.IO.Unsafe (unsafePerformIO)
 
 import ChipmunkTypes
+import ChipmunkCTypes
 
 C.context $ C.baseCtx <> C.vecCtx <> C.funCtx <> cpCtx
 C.include "<chipmunk/chipmunk.h>"

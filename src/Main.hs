@@ -9,6 +9,9 @@ import Control.Monad.Identity
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Ref (Ref, MonadRef)
 
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Encode.Pretty as Aeson
+import qualified Data.ByteString.Lazy.Char8 as BS
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Sum ((==>), DSum(..))
@@ -36,10 +39,6 @@ import GHC.Float (float2Double)
 
 import Linear (V2(..), V4(..))
 
-import qualified ChipmunkBindings as H
-import qualified ChipmunkTypes as H
-import Game
-
 import Reflex
 import Reflex.Host.Class
     ( newEventWithTriggerRef
@@ -54,6 +53,10 @@ import SDL (Point(P))
 import qualified SDL
 import qualified SDL.Image
 import qualified SDL.Primitive as SDL
+
+import qualified ChipmunkBindings as H
+import Game
+import Level
 
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
@@ -224,8 +227,8 @@ main = do
             }
     window <- SDL.createWindow "Ava" windowSettings
     textureRenderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
-                { SDL.rendererTargetTexture = True
-                }
+        { SDL.rendererTargetTexture = True
+        }
 
     renderTexture <- SDL.createTexture textureRenderer
         SDL.RGBA8888 SDL.TextureAccessTarget (V2 renderTextureSize renderTextureSize)

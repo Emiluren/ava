@@ -16,12 +16,15 @@ extra-source-files:  README.md
 executable ava
   hs-source-dirs:      src
   main-is:             Main.hs
-  other-modules:       SpriterBindings
-                     , SpriterTypes
-                     , ChipmunkBindings
+  other-modules:       ChipmunkBindings
+                     , ChipmunkCTypes
                      , ChipmunkTypes
                      , Game
+                     , Instances
+                     , Level
                      , Reflex.Time
+                     , SpriterBindings
+                     , SpriterTypes
   default-language:    Haskell2010
   extra-libraries:     spriterengine chipmunk pthread stdc++
   c-sources:           src/SpriterBindings.cpp
@@ -30,6 +33,9 @@ executable ava
                      , src/jsonspriterfileattributewrapper.cpp
                      , src/jsonspriterfileelementwrapper.cpp
   build-depends:       base >= 4.7 && < 5
+                     , aeson
+                     , aeson-pretty
+                     , bytestring
                      , containers >= 0.5
                      , dependent-sum
                      , dependent-sum-template

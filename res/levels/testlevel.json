@@ -1,0 +1,106 @@
+{
+    "extraObjects": [
+        [
+            "Ball",
+            {
+                "cpVecY": 20,
+                "cpVecX": 200
+            }
+        ]
+    ],
+    "playerStartPosition": {
+        "cpVecY": 100,
+        "cpVecX": 240
+    },
+    "wallEdges": [
+        [
+            {
+                "cpVecY": 200,
+                "cpVecX": 100
+            },
+            {
+                "cpVecY": 320,
+                "cpVecX": 300
+            }
+        ],
+        [
+            {
+                "cpVecY": 0,
+                "cpVecX": 0
+            },
+            {
+                "cpVecY": -10,
+                "cpVecX": -200
+            }
+        ],
+        [
+            {
+                "cpVecY": -10,
+                "cpVecX": -200
+            },
+            {
+                "cpVecY": 360,
+                "cpVecX": -200
+            }
+        ],
+        [
+            {
+                "cpVecY": 360,
+                "cpVecX": -200
+            },
+            {
+                "cpVecY": 400,
+                "cpVecX": 0
+            }
+        ],
+        [
+            {
+                "cpVecY": 400,
+                "cpVecX": 0
+            },
+            {
+                "cpVecY": 380,
+                "cpVecX": 150
+            }
+        ],
+        [
+            {
+                "cpVecY": 380,
+                "cpVecX": 150
+            },
+            {
+                "cpVecY": 400,
+                "cpVecX": 400
+            }
+        ],
+        [
+            {
+                "cpVecY": 400,
+                "cpVecX": 400
+            },
+            {
+                "cpVecY": 0,
+                "cpVecX": 400
+            }
+        ],
+        [
+            {
+                "cpVecY": 0,
+                "cpVecX": 400
+            },
+            {
+                "cpVecY": 0,
+                "cpVecX": 0
+            }
+        ]
+    ],
+    "initEnemies": [
+        [
+            "Mummy",
+            {
+                "cpVecY": 200,
+                "cpVecX": 110
+            }
+        ]
+    ]
+}
