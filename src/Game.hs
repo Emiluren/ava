@@ -8,6 +8,7 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Aeson.Encode.Pretty as Aeson
 import Data.Bool (bool)
 import qualified Data.ByteString.Lazy.Char8 as BS
+import Data.List (find)
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
@@ -309,40 +310,66 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             movement <- foldDyn (+) (V2 0 0) deltaMovements
             return $ pure p + current movement
 
+        snappingDistance = 40
+
         findClosestShape point = liftIO $ do
-            pointQueryInfo <- H.spacePointQueryNearest space (H.fromV2 point) 20 groundCheckFilter
+            pointQueryInfo <- H.spacePointQueryNearest space (H.fromV2 point) snappingDistance groundCheckFilter
             let closestShape = H.pointQueryInfoShape pointQueryInfo
             if closestShape == nullPtr
                 then return Nothing
-                else return $ Just $ H.toV2 $ H.pointQueryInfoPoint pointQueryInfo
+                else return $ Just pointQueryInfo
+
+        findCorner currentMiscRefs pointQueryInfo =
+            let mShapeRefs = find (\(shape, _) -> shape == H.pointQueryInfoShape pointQueryInfo) currentMiscRefs
+                point = H.pointQueryInfoPoint pointQueryInfo
+            in case mShapeRefs of
+                Just (_, H.LineSegment c1 c2 _) ->
+                    let dc1 = H.len (point - c1)
+                        dc2 = H.len (point - c2)
+                    in
+                        if dc1 <= dc2 && dc1 < snappingDistance then
+                            H.toV2 c1
+                        else if dc2 <= dc1 && dc2 < snappingDistance then
+                            H.toV2 c2
+                        else
+                            H.toV2 point
+                _ ->
+                    H.toV2 point
 
     rec
-        eSnapPos <- fmapMaybe id <$> performEvent (findClosestShape <$> cameraPosition <@ eSnapToShape)
+        eShapeToSnapTo <- fmapMaybe id <$> performEvent (findClosestShape <$> cameraPosition <@ eSnapToShape)
+
+        miscRefs <- current <$> foldDyn (:) (extraPhysicsRefs levelLoaded) eNewCreatedWall
+        let eSnapPos = findCorner <$> miscRefs <@> eShapeToSnapTo
+
+        newWallPos <- hold Nothing $ leftmost
+            [ Nothing <$ updated dynNotEditing
+            , Nothing <$ ePadBPressed
+            , Nothing <$ eEscPressed
+            , Just <$> cameraPosition <@ eCreateNewWall
+            ]
+
+        let maybeSpawnWall :: () -> PushM t (Maybe (H.Vector, H.Vector))
+            maybeSpawnWall () = do
+                mWPos <- sample newWallPos
+                camPos <- sample cameraPosition
+                case mWPos of
+                    Nothing -> return Nothing
+                    Just p -> return $ Just (H.fromV2 p, H.fromV2 camPos)
+
+            eNewWallEdge = push maybeSpawnWall eCreateNewWall
+
+        eNewCreatedWall <- performEvent $ liftIO . createWall space <$> eNewWallEdge
+
+        let addWallToLevelData wall levelData = levelData
+                { wallEdges = wall : wallEdges levelData
+                }
+        currentLevelData <- foldDyn addWallToLevelData (initialData levelLoaded) eNewWallEdge
 
         cameraPosition <- switcher (H.toV2 <$> playerPosition) $ leftmost
             [ pushAlways (cameraBehavior $ fmap H.toV2 playerPosition) (updated dynNotEditing)
             , pushAlways (\p -> cameraBehavior (pure p) False) eSnapPos
             ]
-
-    eSaveLevel <- ffilter id <$> performEvent (ctrlPressed <$ gate editing eSPressed)
-
-    newWallPos <- hold Nothing $ leftmost
-        [ Nothing <$ updated dynNotEditing
-        , Nothing <$ ePadBPressed
-        , Nothing <$ eEscPressed
-        , Just <$> cameraPosition <@ eCreateNewWall
-        ]
-
-    let maybeSpawnWall () = do
-            mWPos <- sample newWallPos
-            camPos <- sample cameraPosition
-            case mWPos of
-                Nothing -> return Nothing
-                Just p -> return $ Just (H.fromV2 p, H.fromV2 camPos)
-
-        eNewWallEdge = push maybeSpawnWall eCreateNewWall
-
-    eNewCreatedWall <- performEvent $ liftIO . createWall space <$> eNewWallEdge
 
     let saveLevel levelData = liftIO $ do
             putStr "File name: ./res/levels/"
@@ -350,14 +377,9 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             BS.writeFile filename $ Aeson.encodePretty levelData
             putStrLn $ filename ++ " was saved"
 
-        addWallToLevelData wall levelData = levelData
-            { wallEdges = wall : wallEdges levelData
-            }
-    currentLevelData <- foldDyn addWallToLevelData (initialData levelLoaded) eNewWallEdge
+    eSaveLevel <- ffilter id <$> performEvent (ctrlPressed <$ gate editing eSPressed)
 
     performEvent_ $ saveLevel <$> current currentLevelData <@ eSaveLevel
-
-    miscRefs <- current <$> foldDyn (:) (extraPhysicsRefs levelLoaded) eNewCreatedWall
 
     let renderShapes = do
             dbgRender <- debugRendering
