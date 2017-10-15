@@ -60,11 +60,11 @@ data PhysicsOutput = PhysicsOutput
     { physicsPlayerOnGround :: Bool
     , physicsPlayerPosition :: H.Vector
     , physicsPlayerVelocity :: H.Vector
-    , physicsAiPositions :: [H.Vector]
+    --, physicsAiPositions :: [H.Vector]
     }
 
-samplePhysics :: Ptr H.Body -> [Ptr H.Body] -> IO PhysicsOutput
-samplePhysics playerBody characterBodies = do
+samplePhysics :: Ptr H.Body -> IO PhysicsOutput
+samplePhysics playerBody = do
     arbiters <- H.bodyEachArbiterList playerBody
     playerCollisionWithGround <- forM arbiters $ \arb -> do
         (s1, s2) <- H.arbiterGetShapes arb
@@ -75,12 +75,12 @@ samplePhysics playerBody characterBodies = do
         return (isPlayer && onSolid)
     playerPosition <- get $ H.position playerBody
     playerVelocity <- get $ H.velocity playerBody
-    aiPositions <- mapM (get . H.position) characterBodies
+    --aiPositions <- mapM (get . H.position) characterBodies
     return PhysicsOutput
         { physicsPlayerOnGround = or playerCollisionWithGround
         , physicsPlayerPosition = playerPosition
         , physicsPlayerVelocity = playerVelocity
-        , physicsAiPositions = aiPositions
+        --, physicsAiPositions = aiPositions
         }
 
 particleSpawnInterval :: Time.NominalDiffTime
@@ -128,19 +128,13 @@ initLevelNetwork :: forall t m. MonadGame t m =>
     LevelLoadedData ->
     m (LogicOutput t)
 initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad levelLoaded = do
-    let space = levelSpace levelLoaded
-        (playerFeetShape, playerBodyShape) = playerPhysicsRefs levelLoaded
-        aiShapesAndSprites = aiPhysicsRefs levelLoaded :: [(CharacterPhysicsRefs, Ptr Spriter.CEntityInstance)]
-        aiShapes = fst <$> aiShapesAndSprites
-        aiFeetShapes = fst <$> aiShapes
-        aiSprites = snd <$> aiShapesAndSprites
-
-        pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
+    let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eF1Pressed = pressEvent SDL.KeycodeF1
         eF2Pressed = pressEvent SDL.KeycodeF2
         eF3Pressed = pressEvent SDL.KeycodeF3
         eBackspacePressed = pressEvent SDL.KeycodeBackspace
         eEscPressed = pressEvent SDL.KeycodeEscape
+        eEnterPressed = pressEvent SDL.KeycodeReturn
 
         ePadButtonPress = select sdlEventFan (JoyButtonEvent 0)
         padFilterButtonPress b = ffilter
@@ -150,6 +144,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         ePadLTPressed = padFilterButtonPress padTriggerLeft
         ePadRTPressed = padFilterButtonPress padTriggerRight
         ePadBackPressed = padFilterButtonPress padButtonBack
+        ePadLeftStickPressed = padFilterButtonPress padLeftStick
 
     ePollInput <- tickLossy (1/15) startTime
     eCurrentInput <- performEvent $ pollInput mGamepad <$ ePollInput
@@ -162,37 +157,64 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
     let notEditing = current dynNotEditing
 
+    let space = levelSpace levelLoaded
+        (playerFeetShape, playerBodyShape) = playerPhysicsRefs levelLoaded
+        initialShapesAndSprites = aiPhysicsRefs levelLoaded :: [(CharacterPhysicsRefs, Ptr Spriter.CEntityInstance)]
+
     playerBody <- get $ H.shapeBody playerFeetShape
-    aiBodies <- mapM (get . H.shapeBody) aiFeetShapes
+    --aiBodies <- mapM (get . H.shapeBody) aiFeetShapes
     aiTick <- gate notEditing <$> tickLossy (1/15) startTime
 
     clock <- clockLossy (1/60) startTime
     clockDiffs <- mapAccum_ (\t t' -> (t', Time.diffUTCTime t' t) ) startTime $ _tickInfo_lastUTC <$> updated clock
     gameTime <- foldDyn (+) 0 $ gate notEditing clockDiffs
 
-    let stepPhysics playerSurfaceVel aiSurfaceVels playerForce stepsToRun = liftIO $ do
+    let stepPhysics playerSurfaceVel aiSurfaceVels playerForce feetShapes stepsToRun = liftIO $ do
             H.surfaceVel playerFeetShape $= H.scale playerSurfaceVel (-1)
             H.force playerBody $= playerForce
 
-            forM_ (zip aiFeetShapes aiSurfaceVels) $ \(feetShape, surfVel) ->
+            forM_ (zip feetShapes aiSurfaceVels) $ \(feetShape, surfVel) ->
                 H.surfaceVel feetShape $= surfVel
 
             replicateM_ stepsToRun $ H.step space $ realToFrac timeStep
-            samplePhysics playerBody aiBodies
 
-    initialPhysicsState <- liftIO $ samplePhysics playerBody aiBodies
+            samplePhysics playerBody
+
+        initialAiShapes = fst <$> initialShapesAndSprites
+        initialAiSprites = snd <$> initialShapesAndSprites
+
+    initialPhysicsState <- liftIO $ samplePhysics playerBody
 
     let debugRenderSettings = DebugRenderSettings
             <$> debugRendering
             <*> characterDbg
             <*> colCheckDbg
 
+        --initialAiPositions = physicsAiPositions initialPhysicsState
+
     rec
         let playerOnGround = physicsPlayerOnGround <$> physicsOutput
             playerPosition = physicsPlayerPosition <$> physicsOutput
             playerVelocity = physicsPlayerVelocity <$> physicsOutput
-            aiSurfaceVelocities = sequenceA $ characterSurfaceVelocity <$> aiCharacters
-            aiPositions = physicsAiPositions <$> physicsOutput :: Behavior t [H.Vector]
+
+            aiSurfaceVelocities :: Behavior t [H.Vector]
+            aiSurfaceVelocities = join $ do
+                currentAiCharacters <- current aiCharacters
+                return $ sequenceA $ characterSurfaceVelocity <$> currentAiCharacters
+                --join . fmap characterSurfaceVelocity <$> current aiCharacters
+            --aiPositions = physicsAiPositions <$> physicsOutput :: Behavior t [H.Vector]
+
+        aiShapesAndSprites :: Behavior t [(CharacterPhysicsRefs, Ptr Spriter.CEntityInstance)] <-
+            hold initialShapesAndSprites never
+
+        let aiShapes :: Behavior t [(Ptr H.Shape, Ptr H.Shape)]
+            aiShapes = fmap fst <$> aiShapesAndSprites
+
+            aiFeetShapes :: Behavior t [Ptr H.Shape]
+            aiFeetShapes = fmap fst <$> aiShapes
+
+            aiSprites :: Behavior t [Ptr Spriter.CEntityInstance]
+            aiSprites = fmap snd <$> aiShapesAndSprites
 
         (player, jetpackOn) <-
             playerNetwork
@@ -204,38 +226,53 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 (bool (const False) <$> pressedKeys <*> notEditing)
                 playerPosition
                 playerOnGround
-                (pure aiBodies)
+                aiShapes
                 debugRenderSettings
                 mGamepad
                 playerBody
                 (playerFeetShape, playerBodyShape)
                 (playerSpriterInstance levelLoaded)
 
+        let initAiCharacter :: (Ptr H.Shape, Ptr H.Shape) -> Ptr Spriter.CEntityInstance -> m (CharacterOutput t)
+            initAiCharacter =
+                     aiCharacterNetwork
+                         startTime
+                         space
+                         playerBody
+                         aiTick
+                         (() <$ eSteppedPhysics)
+                         gameTime
+                         playerPosition
+                         debugRenderSettings
+
         -- TODO: Will only work for a single character and will crash if there are none :P
         -- fix with a normal map and holdGame maybe
-        aiCharacters <-
-            mapM
-                (\(pos, shapes, sprite) ->
-                     aiCharacterNetwork startTime space playerBody aiTick gameTime playerPosition debugRenderSettings pos shapes sprite)
-                [(head <$> aiPositions, head aiShapes, head aiSprites)]
+        (aiCharacters :: Dynamic t [CharacterOutput t]) <-
+            holdGameMode
+                (sequenceA $ uncurry initAiCharacter <$> zip initialAiShapes initialAiSprites)
+                never
 
         eSteppedPhysics <- performEvent $ stepPhysics
             <$> characterSurfaceVelocity player
             <*> aiSurfaceVelocities
             <*> characterForce player
+            <*> aiFeetShapes
             <@> gate notEditing eStepPhysics
         physicsOutput <- hold initialPhysicsState eSteppedPhysics
 
     let playerEntityInstance = playerSpriterInstance levelLoaded
 
     eSpriterTick <- tickLossy spriterTimeStep startTime
-    eSpriterDiffs <- mapAccum_ (\oldTime newTime -> (newTime, Time.diffUTCTime newTime oldTime))
+    eSpriterDiff <- mapAccum_ (\oldTime newTime -> (newTime, Time.diffUTCTime newTime oldTime))
         startTime $ _tickInfo_lastUTC <$> eSpriterTick
     performEvent_ $ liftIO . Spriter.setEntityInstanceTimeElapsed playerEntityInstance
-        . realToFrac . (*1000) <$> gate notEditing eSpriterDiffs
-    forM_ aiSprites $ \aiEntityInstance ->
-        performEvent_ $ liftIO . Spriter.setEntityInstanceTimeElapsed aiEntityInstance
-            . realToFrac . (*1000) <$> gate notEditing eSpriterDiffs
+        . realToFrac . (*1000) <$> gate notEditing eSpriterDiff
+
+    let setAiDeltas currentAiSprites diff =
+            forM_ currentAiSprites $ \aiEntityInstance ->
+                liftIO . Spriter.setEntityInstanceTimeElapsed aiEntityInstance . realToFrac $ diff * 1000
+
+    performEvent_ $ setAiDeltas <$> aiSprites <@> gate notEditing eSpriterDiff
 
     jetpackTex <- SDL.Image.loadTexture textureRenderer "res/jetpack.png"
     liftIO $ putStrLn "Loaded: res/jetpack.png"
@@ -290,9 +327,9 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         editMoveInput = V2 <$> xInput <*> yInput
 
         eSpacePressed = pressEvent SDL.KeycodeSpace
+        eDeletePressed = pressEvent SDL.KeycodeDelete
         eSPressed = pressEvent SDL.KeycodeS
         eUPressed = pressEvent SDL.KeycodeU
-        eDeletePressed = pressEvent SDL.KeycodeDelete
 
         editing = not <$> notEditing
         editingCommand eKey ePad = gate editing $ leftmost [ () <$ eKey, () <$ ePad ]
@@ -415,6 +452,10 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             BS.writeFile filename $ Aeson.encodePretty levelData
             putStrLn $ filename ++ " was saved"
 
+        ePrintCamPos = leftmost [ () <$ eEnterPressed, () <$ ePadLeftStickPressed ]
+
+    performEvent_ $ liftIO . print <$> (cameraPosition <@ ePrintCamPos)
+
     eSaveLevel <- ffilter id <$> performEvent (ctrlPressed <$ gate editing eSPressed)
 
     performEvent_ $ saveLevel <$> current currentLevelData <@ eSaveLevel
@@ -463,13 +504,18 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             <$> renderNewWall <> renderCrosshair
             <*> editing
 
+        aiRendering :: Behavior t [Renderable]
+        aiRendering = do
+            currentAiCharacters <- current aiCharacters
+            fmap concat $ sequenceA $ characterRendering <$> currentAiCharacters
+
     return LogicOutput
         { cameraCenterPosition = cameraPosition
         , renderCommands =
                 renderParticles
                 <> renderJetpack
                 <> characterRendering player
-                <> mconcat (fmap characterRendering aiCharacters)
+                <> aiRendering
                 <> renderShapes
                 <> renderInterface
         , quit = () <$ pressEvent SDL.KeycodeQ

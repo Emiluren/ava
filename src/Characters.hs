@@ -199,14 +199,14 @@ aiCharacterNetwork :: forall t m. MonadGame t m =>
     Ptr H.Space ->
     Ptr H.Body ->
     Event t TickInfo ->
+    Event t () ->
     Dynamic t Time.NominalDiffTime ->
     Behavior t H.Vector ->
     Behavior t DebugRenderSettings ->
-    Behavior t H.Vector ->
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t)
-aiCharacterNetwork startTime space playerBody aiTick gameTime playerPosition debugSettings pos (feetShape, bodyShape) sprite = do
+aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics gameTime playerPosition debugSettings (feetShape, bodyShape) sprite = do
     let speedForAnim "Run" = playerSpeed / 3
         speedForAnim _ = playerSpeed / 6
 
@@ -244,7 +244,10 @@ aiCharacterNetwork startTime space playerBody aiTick gameTime playerPosition deb
                          return False)
 
 
-    --body <- get $ H.shapeBody feetShape
+    body <- get $ H.shapeBody feetShape
+
+    ePolledPos <- performEvent $ get (H.position body) <$ eSamplePhysics
+    pos <- hold H.zero ePolledPos
 
     rec
         let mummyEyePos = pos + pure (H.Vector 0 (-20))
@@ -284,7 +287,7 @@ aiCharacterNetwork startTime space playerBody aiTick gameTime playerPosition deb
                     queryLineSeg space seg groundCheckFilter
                 return (cgr, cgl, cwr, cwl)
 
-        eCanSeePlayer <- performEvent $ checkForPlayer <$> mummyDisplayDir <*> mummyVisionLine <@ aiTick
+        eCanSeePlayer <- performEvent $ checkForPlayer <$> mummyDisplayDir <*> mummyVisionLine <@ eAiTick
 
         mummySeesPlayer <- hold False eCanSeePlayer
 
@@ -311,7 +314,7 @@ aiCharacterNetwork startTime space playerBody aiTick gameTime playerPosition deb
                         | canGoLeft -> (AiLeft, "Walk")
                         | otherwise -> (AiStay, "Idle")
 
-        colResults <- performEvent $ liftIO <$> (doAiCollisionChecks <$> pos <@ aiTick)
+        colResults <- performEvent $ liftIO <$> (doAiCollisionChecks <$> pos <@ eAiTick)
 
         let checkForHitPossibility canSeePlayer dir (_, _, colRight, colLeft) = liftIO $
                 if not canSeePlayer then
@@ -410,14 +413,14 @@ playerNetwork :: forall t m. MonadGame t m =>
     Behavior t (SDL.Scancode -> Bool) ->
     Behavior t H.Vector ->
     Behavior t Bool ->
-    Behavior t [Ptr H.Body] ->
+    Behavior t [(Ptr H.Shape, Ptr H.Shape)] ->
     Behavior t DebugRenderSettings ->
     Maybe SDL.Joystick ->
     Ptr H.Body ->
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t, Behavior t Bool)
-playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos onGround aiBodies debugSettings mGamepad body (feetShape, bodyShape) sprite = do
+playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite = do
     let pressEvent kc = gate notEditing $ ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
@@ -445,8 +448,9 @@ playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos on
 
         jump imp = liftIO $ H.applyImpulse body (H.Vector 0 imp) H.zero
 
-        playerKickEffect :: H.Vector -> Direction -> [Ptr H.Body] -> Performable m Bool
-        playerKickEffect playerP playerD currentAiBodies =
+        playerKickEffect :: H.Vector -> Direction -> [(Ptr H.Shape, Ptr H.Shape)] -> Performable m Bool
+        playerKickEffect playerP playerD currentAiShapes = do
+            currentAiBodies <- mapM (get . H.shapeBody) $ fst <$> currentAiShapes
             liftIO $ attackEffect space playerP playerD 1000
                 (\_ hitBody -> if hitBody `elem` currentAiBodies then
                         putStrLn "Kicked mummy" >> return True
@@ -496,7 +500,7 @@ playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos on
         ]
 
     performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ ePlayerKick
-    hitEnemy <- performEvent $ playerKickEffect <$> pos <*> playerDir <*> aiBodies <@ eDelayedPlayerKick
+    hitEnemy <- performEvent $ playerKickEffect <$> pos <*> playerDir <*> aiShapes <@ eDelayedPlayerKick
 
     performEvent_ $ jump <$> jumpEvent
 
