@@ -457,8 +457,6 @@ playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos on
     eCurrentInput <- performEvent $ pollInput mGamepad <$ gate notEditing ePollInput
     gamepadInput <- hold initialInput eCurrentInput
 
-    performEvent_ $ liftIO . print <$> ePadButtonPress
-
     let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
         dPressed = ($ SDL.ScancodeD) <$> pressedKeys
         iPressed = ($ SDL.ScancodeI) <$> pressedKeys

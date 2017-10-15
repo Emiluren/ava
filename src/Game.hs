@@ -338,9 +338,9 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         checkShapeForDeletion currentMiscRefs pointQueryInfo = liftIO $ do
             let mShapeRefs = find (\(shape, _) -> shape == H.pointQueryInfoShape pointQueryInfo) currentMiscRefs
             case mShapeRefs of
-                Just refs@(shape, H.LineSegment {} ) -> do
+                Just refs@(shape, H.LineSegment s e _) -> do
                     putStrLn $ "Gonna delete " ++ show refs
-                    return $ Just shape
+                    return $ Just (shape, (s, e))
                 Just refs -> do
                     putStrLn $ "Can't delete " ++ show refs ++ ". Not a wall"
                     return Nothing
@@ -355,7 +355,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         eShapeToDelete <- findClosestShapeOn eDeleteShape
 
         eShapeShouldBeDeleted <- fmapMaybe id <$> performEvent (checkShapeForDeletion <$> miscRefs <@> eShapeToDelete)
-        performEvent_ $ liftIO . H.spaceRemoveShape space <$> eShapeShouldBeDeleted
+        performEvent_ $ liftIO . H.spaceRemoveShape space . fst <$> eShapeShouldBeDeleted
 
         let updateMiscRefs ::
                 Either (Ptr H.Shape) (Ptr H.Shape, H.ShapeType) ->
@@ -367,7 +367,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
             eMiscUpdates = leftmost
                 [ Right <$> eNewCreatedWall
-                , Left <$> eShapeShouldBeDeleted
+                , Left . fst <$> eShapeShouldBeDeleted
                 ]
 
         miscRefs <- current <$> foldDyn updateMiscRefs (extraPhysicsRefs levelLoaded) eMiscUpdates
@@ -392,10 +392,17 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
         eNewCreatedWall <- performEvent $ liftIO . createWall space <$> eNewWallEdge
 
-        let addWallToLevelData wall levelData = levelData
+        let updateLevelData (Right wall) levelData = levelData
                 { wallEdges = wall : wallEdges levelData
                 }
-        currentLevelData <- foldDyn addWallToLevelData (initialData levelLoaded) eNewWallEdge
+            updateLevelData (Left wall) levelData = levelData
+                { wallEdges = filter (/= wall) $ wallEdges levelData
+                }
+            eWallDataUpdates = leftmost
+                [ Right <$> eNewWallEdge
+                , Left . snd <$> eShapeShouldBeDeleted
+                ]
+        currentLevelData <- foldDyn updateLevelData (initialData levelLoaded) eWallDataUpdates
 
         cameraPosition <- switcher (H.toV2 <$> playerPosition) $ leftmost
             [ pushAlways (cameraBehavior $ fmap H.toV2 playerPosition) (updated dynNotEditing)
