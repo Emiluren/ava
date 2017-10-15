@@ -158,6 +158,7 @@ initLevel imgloader renderf levelData = do
     aiRefs <- forM (initEnemies levelData) $ \(enemyType, initPosition) ->
         case enemyType of
             Mummy -> do
+                putStrLn $ "Creating mymmy at " ++ show initPosition
                 mummyRefs@(mummyFeetShape, mummyBodyShape) <- makeCharacter space
                 mummyBody <- get $ H.shapeBody mummyFeetShape
                 H.position mummyBody $= initPosition
@@ -201,8 +202,9 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
     eInit <- getPostBuild
 
     let loadTestLevel = liftIO $ do
+            -- TODO: add jetpack to 512 -111
             Just level <- (Aeson.decode :: BS.ByteString -> Maybe LevelData)
-                <$> BS.readFile "res/levels/testlevel2.json"
+                <$> BS.readFile "res/levels/jetpack_corridor.json"
             initLevel imgloader renderf level
 
     eLevelLoaded <- performEvent $ loadTestLevel <$ eInit
