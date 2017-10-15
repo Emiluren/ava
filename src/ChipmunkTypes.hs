@@ -176,7 +176,7 @@ data Arbiter
 data ShapeType
     = LineSegment Vector Vector CpFloat
     | Circle CpFloat Vector
-    | Polygon (V.Vector Vector) CpFloat
+    | Polygon (V.Vector Vector) CpFloat deriving Show
 
 type BeginHandler = Ptr Arbiter -> IO Bool
 type PreSolveHandler = Ptr Arbiter -> IO Bool

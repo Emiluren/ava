@@ -202,7 +202,7 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
 
     let loadTestLevel = liftIO $ do
             Just level <- (Aeson.decode :: BS.ByteString -> Maybe LevelData)
-                <$> BS.readFile "res/levels/testlevel.json"
+                <$> BS.readFile "res/levels/testlevel2.json"
             initLevel imgloader renderf level
 
     eLevelLoaded <- performEvent $ loadTestLevel <$ eInit

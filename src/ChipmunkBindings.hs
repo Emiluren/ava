@@ -214,6 +214,9 @@ spaceAddShape space shape = [C.exp| void { cpSpaceAddShape($(cpSpace* space), $(
 spaceAddBody :: Ptr Space -> Ptr Body -> IO ()
 spaceAddBody space body = [C.exp| void { cpSpaceAddBody($(cpSpace* space), $(cpBody* body)) } |]
 
+spaceRemoveShape :: Ptr Space -> Ptr Shape -> IO ()
+spaceRemoveShape space shape = [C.exp| void { cpSpaceRemoveShape($(cpSpace* space), $(cpShape* shape)) } |]
+
 spaceSegmentQueryFirst :: Ptr Space -> Vector -> Vector -> CpFloat -> ShapeFilter -> IO SegmentQueryInfo
 spaceSegmentQueryFirst space start end radius (ShapeFilter group categories mask) = do
     startPtr <- malloc

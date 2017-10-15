@@ -1,4 +1,4 @@
-{-# LANGUAGE RecursiveDo, ScopedTypeVariables #-}
+{-# LANGUAGE RecursiveDo, ScopedTypeVariables, FlexibleContexts #-}
 module Game where
 
 import Control.Monad (replicateM_)
@@ -148,6 +148,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         ePadAPressed = padFilterButtonPress padButtonA
         ePadBPressed = padFilterButtonPress padButtonB
         ePadLTPressed = padFilterButtonPress padTriggerLeft
+        ePadRTPressed = padFilterButtonPress padTriggerRight
         ePadBackPressed = padFilterButtonPress padButtonBack
 
     ePollInput <- tickLossy (1/15) startTime
@@ -291,16 +292,14 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         eSpacePressed = pressEvent SDL.KeycodeSpace
         eSPressed = pressEvent SDL.KeycodeS
         eUPressed = pressEvent SDL.KeycodeU
-        editing = not <$> notEditing
-        eCreateNewWall = gate editing $ leftmost
-            [ () <$ eSpacePressed
-            , () <$ ePadAPressed
-            ]
+        eDeletePressed = pressEvent SDL.KeycodeDelete
 
-        eSnapToShape = gate editing $ leftmost
-            [ () <$ eUPressed
-            , () <$ ePadLTPressed
-            ]
+        editing = not <$> notEditing
+        editingCommand eKey ePad = gate editing $ leftmost [ () <$ eKey, () <$ ePad ]
+
+        eCreateNewWall = editingCommand eSpacePressed ePadAPressed
+        eSnapToShape = editingCommand eUPressed ePadLTPressed
+        eDeleteShape = editingCommand eDeletePressed ePadRTPressed
 
         cameraBehavior _ True = return $ H.toV2 <$> playerPosition
         cameraBehavior startPos False = do
@@ -336,10 +335,42 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 _ ->
                     H.toV2 point
 
-    rec
-        eShapeToSnapTo <- fmapMaybe id <$> performEvent (findClosestShape <$> cameraPosition <@ eSnapToShape)
+        checkShapeForDeletion currentMiscRefs pointQueryInfo = liftIO $ do
+            let mShapeRefs = find (\(shape, _) -> shape == H.pointQueryInfoShape pointQueryInfo) currentMiscRefs
+            case mShapeRefs of
+                Just refs@(shape, H.LineSegment {} ) -> do
+                    putStrLn $ "Gonna delete " ++ show refs
+                    return $ Just shape
+                Just refs -> do
+                    putStrLn $ "Can't delete " ++ show refs ++ ". Not a wall"
+                    return Nothing
+                _ ->
+                    return Nothing
 
-        miscRefs <- current <$> foldDyn (:) (extraPhysicsRefs levelLoaded) eNewCreatedWall
+    rec
+        let findClosestShapeOn :: Event t a -> m (Event t H.PointQueryInfo)
+            findClosestShapeOn event = fmapMaybe id <$> performEvent (findClosestShape <$> cameraPosition <@ event)
+
+        eShapeToSnapTo <- findClosestShapeOn eSnapToShape
+        eShapeToDelete <- findClosestShapeOn eDeleteShape
+
+        eShapeShouldBeDeleted <- fmapMaybe id <$> performEvent (checkShapeForDeletion <$> miscRefs <@> eShapeToDelete)
+        performEvent_ $ liftIO . H.spaceRemoveShape space <$> eShapeShouldBeDeleted
+
+        let updateMiscRefs ::
+                Either (Ptr H.Shape) (Ptr H.Shape, H.ShapeType) ->
+                [(Ptr H.Shape, H.ShapeType)] ->
+                [(Ptr H.Shape, H.ShapeType)]
+
+            updateMiscRefs (Right newWallRef) = (newWallRef :)
+            updateMiscRefs (Left shapeToRemove) = filter ((/= shapeToRemove) . fst)
+
+            eMiscUpdates = leftmost
+                [ Right <$> eNewCreatedWall
+                , Left <$> eShapeShouldBeDeleted
+                ]
+
+        miscRefs <- current <$> foldDyn updateMiscRefs (extraPhysicsRefs levelLoaded) eMiscUpdates
         let eSnapPos = findCorner <$> miscRefs <@> eShapeToSnapTo
 
         newWallPos <- hold Nothing $ leftmost

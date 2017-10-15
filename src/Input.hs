@@ -21,6 +21,11 @@ padTriggerRight = 5
 padButtonBack = 6
 padButtonStart = 7
 
+padButtonHome, padLeftStick, padRightStick :: Num a => a
+padButtonHome = 8
+padLeftStick = 9
+padRightStick = 10
+
 padXAxis :: Word8
 padXAxis = 0
 
