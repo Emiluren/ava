@@ -128,7 +128,7 @@ initLevel imgloader renderf levelData = do
 
     putStrLn "Creating misc objects"
 
-    extraObjectRefs <- forM (extraObjects levelData) $ \(objectType, initPosition) ->
+    extraObjectRefs <- forM (physicalObjects levelData) $ \(objectType, initPosition) ->
         case objectType of
             Ball -> do
                 let circleMoment = H.momentForCircle circleMass (0, circleRadius) (H.Vector 0 0)
@@ -202,10 +202,10 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
     eInit <- getPostBuild
 
     let loadTestLevel = liftIO $ do
-            -- TODO: add jetpack to 512 -111
-            Just level <- (Aeson.decode :: BS.ByteString -> Maybe LevelData)
-                <$> BS.readFile "res/levels/jetpack_corridor.json"
-            initLevel imgloader renderf level
+            mLevel <- Aeson.eitherDecode <$> BS.readFile "res/levels/jetpack_corridor.json"
+            case mLevel of
+                Right level -> initLevel imgloader renderf level
+                Left string -> error $ "Could not parse level: " ++ string
 
     eLevelLoaded <- performEvent $ loadTestLevel <$ eInit
 
@@ -271,7 +271,7 @@ main = do
         render :: MonadIO m => V2 CDouble -> [Renderable] -> m ()
         render camOffset renderables = do
             SDL.rendererRenderTarget textureRenderer $= Just renderTexture
-            SDL.rendererDrawColor textureRenderer $= V4 10 20 10 255
+            SDL.rendererDrawColor textureRenderer $= V4 55 60 55 255
             SDL.clear textureRenderer
 
             liftIO $ forM_ renderables $ \renderable ->

@@ -1,7 +1,8 @@
 {-# LANGUAGE DeriveGeneric #-}
 module Level
     ( EnemyType(..)
-    , ObjectType(..)
+    , PhysicalObjectType(..)
+    , PickupObjectType(..)
     , LevelData(..)
     , testLevel
     ) where
@@ -17,16 +18,22 @@ instance ToJSON EnemyType where
     toEncoding = genericToEncoding defaultOptions
 instance FromJSON EnemyType
 
-data ObjectType = Ball | Box deriving (Eq, Show, Generic)
-instance ToJSON ObjectType where
+data PhysicalObjectType = Ball | Box deriving (Eq, Show, Generic)
+instance ToJSON PhysicalObjectType where
     toEncoding = genericToEncoding defaultOptions
-instance FromJSON ObjectType
+instance FromJSON PhysicalObjectType
+
+data PickupObjectType = Jetpack | Placeholderforproperjsonencoding deriving (Eq, Show, Generic)
+instance ToJSON PickupObjectType where
+    toEncoding = genericToEncoding defaultOptions
+instance FromJSON PickupObjectType
 
 data LevelData = LevelData
     { playerStartPosition :: H.Vector
     , wallEdges :: [(H.Vector, H.Vector)]
     , initEnemies :: [(EnemyType, H.Vector)]
-    , extraObjects :: [(ObjectType, H.Vector)]
+    , physicalObjects :: [(PhysicalObjectType, H.Vector)]
+    , pickupableObjects :: [(PickupObjectType, H.Vector)]
     } deriving (Generic, Show, Eq)
 
 instance ToJSON LevelData where
@@ -56,5 +63,6 @@ testLevel =
        { wallEdges = (startV, endV) : edges
        , playerStartPosition = H.Vector 240 100
        , initEnemies = [(Mummy, H.Vector 110 200)]
-       , extraObjects = [(Ball, H.Vector 200 20)]
+       , physicalObjects = [(Ball, H.Vector 200 20)]
+       , pickupableObjects = []
        }

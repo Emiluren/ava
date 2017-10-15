@@ -14,12 +14,14 @@ import qualified Data.Vector.Storable as V
 import Foreign.C.Types (CUInt, CDouble(..))
 import Foreign.Ptr (Ptr, nullPtr)
 
-import Linear (V4(..))
+import Linear (V2(..), V4(..), (*^))
 
 import Reflex
 import Reflex.Time
 
 import qualified SDL
+
+import System.Random (newStdGen, randomRs)
 
 import qualified ChipmunkBindings as H
 import Graphics
@@ -404,14 +406,38 @@ aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics gameTime pl
         , characterRendering = aiAnimation <> renderColDebug
         }
 
+particleSpawnInterval :: Time.NominalDiffTime
+particleSpawnInterval = 0.02
+
+data Particle = Particle
+    { particleVelocity :: V2 CDouble
+    , particleAngularVel :: CDouble
+    , particleStartTime :: Time.NominalDiffTime
+    , particleLifetime :: Time.NominalDiffTime
+    , particleStartPos :: V2 CDouble
+    } deriving Show
+
+particleState :: Time.NominalDiffTime -> Particle -> (V2 CDouble, CDouble)
+particleState gameTime particle =
+    let livedTime = gameTime - particleStartTime particle
+    in ( particleStartPos particle + realToFrac livedTime *^ particleVelocity particle
+       , particleAngularVel particle * realToFrac livedTime
+       )
+
+particleAlive :: Time.NominalDiffTime -> Particle -> Bool
+particleAlive gameTime particle =
+    let livedTime = gameTime - particleStartTime particle
+    in livedTime < particleLifetime particle
+
 playerNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
     Ptr H.Space ->
     EventSelector t SdlEventTag ->
+    Event t () ->
     Dynamic t Time.NominalDiffTime ->
     Behavior t Bool ->
     Behavior t (SDL.Scancode -> Bool) ->
-    Behavior t H.Vector ->
+    (Behavior t H.Vector, Behavior t H.Vector) ->
     Behavior t Bool ->
     Behavior t [(Ptr H.Shape, Ptr H.Shape)] ->
     Behavior t DebugRenderSettings ->
@@ -419,8 +445,9 @@ playerNetwork :: forall t m. MonadGame t m =>
     Ptr H.Body ->
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
-    m (CharacterOutput t, Behavior t Bool)
-playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite = do
+    (SDL.Texture, SDL.Texture) ->
+    m (CharacterOutput t)
+playerNetwork startTime space sdlEventFan ePickUpJetpack gameTime notEditing pressedKeys (pos, velocity) onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite (jetpackTex, particleTex) = do
     let pressEvent kc = gate notEditing $ ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
@@ -460,6 +487,8 @@ playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos on
     ePollInput <- tickLossy (1/15) startTime
     eCurrentInput <- performEvent $ pollInput mGamepad <$ gate notEditing ePollInput
     gamepadInput <- hold initialInput eCurrentInput
+
+    hasJetpack <- hold False $ True <$ ePickUpJetpack
 
     let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
         dPressed = ($ SDL.ScancodeD) <$> pressedKeys
@@ -504,10 +533,43 @@ playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos on
 
     performEvent_ $ jump <$> jumpEvent
 
+    stdGen <- liftIO newStdGen
+
+    let particleXVelocities = randomRs (-20, 20) stdGen
+        jetpackPosition = do
+            p <- pos
+            dir <- playerDir
+            let jetpackOffset = case dir of
+                    DLeft -> V2 3 (-25)
+                    DRight -> V2 (-8) (-25)
+            return $ H.toV2 p + jetpackOffset
+        jetpackOn = (\jp i y -> jp && (i || y)) <$> hasJetpack <*> iPressed <*> yHeld
+
+    eSpawnParticleTick <- gate notEditing <$> tickLossy particleSpawnInterval startTime
+    eParXVel <- zipListWithEvent const particleXVelocities $
+        gate jetpackOn eSpawnParticleTick
+
+    let spawnParticle xv = do
+            playerV <- sample velocity
+            jetpos <- sample jetpackPosition
+            t <- sample $ current gameTime
+            return Particle
+                { particleVelocity = H.toV2 playerV + V2 xv 200
+                , particleAngularVel = xv
+                , particleStartTime = t
+                , particleLifetime = realToFrac $ 0.5 + 0.05 * xv
+                , particleStartPos = jetpos
+                }
+        eNewParticle = pushAlways spawnParticle eParXVel
+
+    rec
+        particles <- hold [] $ flip (:) <$> aliveParticles <@> eNewParticle
+        let aliveParticles = (filter . particleAlive) <$> current gameTime <*> particles
+
+
     let playerAnimation =
             pickAnimation <$> playerMoving <*> onGround <*> latestPlayerKick <*> timeSinceStart
         horizontalForce = bool <$> playerAirForce <*> pure H.zero <*> onGround
-        jetpackOn = (||) <$> iPressed <*> yHeld
         verticalForce = bool H.zero (H.Vector 0 $ -6000) <$> jetpackOn
         playerForce = horizontalForce + verticalForce
 
@@ -530,12 +592,35 @@ playerNetwork startTime space sdlEventFan gameTime notEditing pressedKeys pos on
 
             debugRenderCharacter debugSettings renderFeetAndBody renderSideChecks
 
-    return ( CharacterOutput
-             { characterSurfaceVelocity = playerSurfaceVelocity
-             , characterForce = playerForce
-             , characterAnimation = playerAnimation
-             , characterDirection = playerDir
-             , characterRendering = renderCharacter <> renderColDebug
-             }
-           , jetpackOn
-           )
+        renderJetpack = do
+            hasJet <- hasJetpack
+            if not hasJet
+                then return []
+                else do
+                jetpos <- jetpackPosition
+                anim <- playerAnimation
+                dir <- playerDir
+                let angle =
+                        if anim == "Run" then
+                            if dir == DRight then 10 else -10
+                        else
+                            0
+                return [ StaticSprite jetpackTex jetpos angle ]
+
+        renderParticles = do
+            pars <- aliveParticles
+            currentTime <- current gameTime
+            forM (particleState currentTime <$> pars) $ \(p, angle) ->
+                return $ StaticSprite particleTex p angle
+
+    return CharacterOutput
+        { characterSurfaceVelocity = playerSurfaceVelocity
+        , characterForce = playerForce
+        , characterAnimation = playerAnimation
+        , characterDirection = playerDir
+        , characterRendering =
+                renderParticles
+                <> renderJetpack
+                <> renderCharacter
+                <> renderColDebug
+        }
