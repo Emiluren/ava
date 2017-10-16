@@ -1,5 +1,5 @@
 {
-    "extraObjects": [
+    "physicalObjects": [
         [
             "Ball",
             {
@@ -8,6 +8,7 @@
             }
         ]
     ],
+    "pickupableObjects": [],
     "playerStartPosition": {
         "cpVecY": 100,
         "cpVecX": 240

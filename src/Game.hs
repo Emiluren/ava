@@ -33,10 +33,13 @@ import MonadGame
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
 
+newtype PlayerState = PlayerState { playerStartsWithJetpack :: Bool } deriving (Eq, Show)
+data QuitData = Exit | Loadlevel String PlayerState deriving (Eq, Show)
+
 data LogicOutput t = LogicOutput
     { cameraCenterPosition :: Behavior t (V2 CDouble)
     , renderCommands :: Behavior t [Renderable]
-    , quit :: Event t ()
+    , quit :: Event t QuitData
     }
 
 data LevelLoadedData = LevelLoadedData
@@ -97,9 +100,9 @@ initLevelNetwork :: forall t m. MonadGame t m =>
     Event t Int ->
     Behavior t (SDL.Scancode -> Bool) ->
     Maybe SDL.Joystick ->
-    LevelLoadedData ->
+    (LevelLoadedData, String, PlayerState) ->
     m (LogicOutput t)
-initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad levelLoaded = do
+initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad (levelLoaded, levelName, initialPlayerState) = do
     let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eF1Pressed = pressEvent SDL.KeycodeF1
         eF2Pressed = pressEvent SDL.KeycodeF2
@@ -200,15 +203,15 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
             ePickUpJetpack = push isPlayerTouchingJetpack $ updated gameTime
 
-        playerHasJetpack <- hold False $ True <$ ePickUpJetpack
+        playerHasJetpack <- hold (playerStartsWithJetpack initialPlayerState) $ True <$ ePickUpJetpack
 
         player <-
             playerNetwork
                 startTime
                 space
                 sdlEventFan
-                ePickUpJetpack
                 gameTime
+                playerHasJetpack
                 notEditing
                 (bool (const False) <$> pressedKeys <*> notEditing)
                 (playerPosition, playerVelocity)
@@ -450,6 +453,21 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 Just pos | not hasJet -> return [ StaticSprite jetpackTex (H.toV2 pos + float) 30 ]
                 _ -> return []
 
+    let eRPressed = pressEvent SDL.KeycodeR
+        eQPressed = pressEvent SDL.KeycodeQ
+        eLPressed = pressEvent SDL.KeycodeL
+        promptForLevel = liftIO $ do
+            putStr "Level to load: "
+            name <- getLine
+            putStr "Have jetpack? "
+            keep <- getLine
+            return $ Loadlevel name $ PlayerState (keep == "y")
+
+    performEvent_ $ liftIO (putStrLn "Restarting level") <$ eRPressed
+
+    eCtrlLPressed <- ffilter id <$> performEvent (ctrlPressed <$ eLPressed)
+    eLoadLevel <- performEvent $ promptForLevel <$ eCtrlLPressed
+
     return LogicOutput
         { cameraCenterPosition = cameraPosition
         , renderCommands =
@@ -458,5 +476,9 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 <> aiRendering
                 <> renderShapes
                 <> renderInterface
-        , quit = () <$ pressEvent SDL.KeycodeQ
+        , quit = leftmost
+            [ Exit <$ eQPressed
+            , Loadlevel levelName initialPlayerState <$ eRPressed
+            , eLoadLevel
+            ]
         }

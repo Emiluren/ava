@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, GADTs #-}
+{-# LANGUAGE OverloadedStrings, GADTs, RecursiveDo #-}
 module Main where
 
 import qualified Control.Concurrent.Chan as Chan
@@ -201,13 +201,14 @@ mainReflex :: (MonadGame t m) =>
 mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad = do
     eInit <- getPostBuild
 
-    let loadTestLevel = liftIO $ do
-            mLevel <- Aeson.eitherDecode <$> BS.readFile "res/levels/jetpack_corridor.json"
+    let loadTestLevel levelName playerState = liftIO $ do
+            putStrLn $ "Loading " ++ levelName ++ " with player state " ++ show playerState
+            mLevel <- Aeson.eitherDecode <$> BS.readFile ("res/levels/" ++ levelName)
             case mLevel of
-                Right level -> initLevel imgloader renderf level
+                Right level -> do
+                    levelData <- initLevel imgloader renderf level
+                    return (levelData, levelName, playerState)
                 Left string -> error $ "Could not parse level: " ++ string
-
-    eLevelLoaded <- performEvent $ loadTestLevel <$ eInit
 
     let initialOutput = LogicOutput
             { cameraCenterPosition = pure $ V2 0 0
@@ -215,14 +216,34 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
             , quit = never
             }
 
-    dGameMode <- holdGameMode
-        (return initialOutput)
-        (initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad <$> eLevelLoaded)
+    rec
+        eLevelLoaded <- performEvent $ leftmost
+            [ loadTestLevel "jetpack_corridor.json" (PlayerState False) <$ eInit
+            , uncurry loadTestLevel <$> eSwitchGameMode
+            ]
+
+
+        dGameMode <- holdGameMode
+            (return initialOutput)
+            (initLevelNetwork
+                startTime
+                textureRenderer
+                sdlEventFan
+                eStepPhysics
+                pressedKeys
+                mGamepad
+                <$> eLevelLoaded)
+
+        let eGameModeQuit = switchPromptlyDyn $ quit <$> dGameMode
+
+            filterSwitchMode Exit = Nothing
+            filterSwitchMode (Loadlevel n ps) = Just (n, ps)
+            eSwitchGameMode = fmapMaybe filterSwitchMode eGameModeQuit
 
     return LogicOutput
         { cameraCenterPosition = join $ current $ cameraCenterPosition <$> dGameMode
         , renderCommands = join $ current $ renderCommands <$> dGameMode
-        , quit = switchPromptlyDyn $ quit <$> dGameMode
+        , quit = ffilter (== Exit) eGameModeQuit
         }
 
 main :: IO ()

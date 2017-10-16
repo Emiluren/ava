@@ -433,8 +433,8 @@ playerNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
     Ptr H.Space ->
     EventSelector t SdlEventTag ->
-    Event t () ->
     Dynamic t Time.NominalDiffTime ->
+    Behavior t Bool ->
     Behavior t Bool ->
     Behavior t (SDL.Scancode -> Bool) ->
     (Behavior t H.Vector, Behavior t H.Vector) ->
@@ -447,7 +447,7 @@ playerNetwork :: forall t m. MonadGame t m =>
     Ptr Spriter.CEntityInstance ->
     (SDL.Texture, SDL.Texture) ->
     m (CharacterOutput t)
-playerNetwork startTime space sdlEventFan ePickUpJetpack gameTime notEditing pressedKeys (pos, velocity) onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite (jetpackTex, particleTex) = do
+playerNetwork startTime space sdlEventFan gameTime hasJetpack notEditing pressedKeys (pos, velocity) onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite (jetpackTex, particleTex) = do
     let pressEvent kc = gate notEditing $ ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
@@ -487,8 +487,6 @@ playerNetwork startTime space sdlEventFan ePickUpJetpack gameTime notEditing pre
     ePollInput <- tickLossy (1/15) startTime
     eCurrentInput <- performEvent $ pollInput mGamepad <$ gate notEditing ePollInput
     gamepadInput <- hold initialInput eCurrentInput
-
-    hasJetpack <- hold False $ True <$ ePickUpJetpack
 
     let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
         dPressed = ($ SDL.ScancodeD) <$> pressedKeys
