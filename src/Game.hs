@@ -486,6 +486,15 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
     eLoadLevel <- performEvent $ promptForLevel <$ eCtrlLPressed
 
+    let levelMessages = messages $ initialData levelLoaded
+
+    messageSprites <- liftIO $ forM levelMessages $ \(pos, filename) -> do
+        texture <- SDL.Image.loadTexture textureRenderer $ "res/" ++ filename
+        return (H.toV2 pos, texture)
+
+    let renderMessage (pos, texture) = pure $ StaticSprite texture pos 0
+        renderMessages = sequenceA $ renderMessage <$> messageSprites
+
     return LogicOutput
         { cameraCenterPosition = cameraPosition
         , renderCommands =
@@ -494,6 +503,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 <> aiRendering
                 <> renderShapes
                 <> renderInterface
+                <> renderMessages
         , quit = leftmost
             [ Exit <$ eQPressed
             , Loadlevel levelName initialPlayerState <$ eRPressed

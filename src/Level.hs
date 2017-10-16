@@ -38,6 +38,7 @@ data LevelData = LevelData
     , physicalObjects :: [(PhysicalObjectType, Position)]
     , pickupableObjects :: [(PickupObjectType, Position)]
     , levelexits :: [(Position, Size, String, Position)]
+    , messages :: [(Position, String)]
     } deriving (Generic, Show, Eq)
 
 instance ToJSON LevelData where
@@ -70,4 +71,5 @@ testLevel =
        , physicalObjects = [(Ball, H.Vector 200 20)]
        , pickupableObjects = []
        , levelexits = []
+       , messages = []
        }

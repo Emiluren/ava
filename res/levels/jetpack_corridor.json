@@ -16,6 +16,15 @@
             }
         ]
     ],
+    "messages": [
+        [
+            {
+                "cpVecY": -30,
+                "cpVecX": 500
+            },
+            "instruction_jetpack.png"
+        ]
+    ],
     "physicalObjects": [],
     "playerStartPosition": {
         "cpVecY": 100,

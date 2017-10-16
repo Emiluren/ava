@@ -218,7 +218,7 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
 
     rec
         eLevelLoaded <- performEvent $ leftmost
-            [ loadTestLevel "jetpack_corridor.json" (PlayerState False Nothing) <$ eInit
+            [ loadTestLevel "start.json" (PlayerState False Nothing) <$ eInit
             , uncurry loadTestLevel <$> eSwitchGameMode
             ]
 
@@ -314,7 +314,9 @@ main = do
                             center = SDL.P $ SDL.V2 px py
                             V2 x y = pos - camOffset
                             texSize = V2 (SDL.textureWidth textureInfo) (SDL.textureHeight textureInfo)
-                            renderRect = SDL.Rectangle (SDL.P $ V2 (floor x) (floor y)) texSize
+                            renderRect = SDL.Rectangle
+                                (SDL.P $ V2 (floor x - px) (floor y - py))
+                                texSize
                         SDL.copyEx textureRenderer texture Nothing (Just renderRect) angle (Just center) (V2 False False)
                     Line color p1 p2 -> do
                         let (V2 x1 y1) = p1 - camOffset

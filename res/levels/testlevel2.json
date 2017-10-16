@@ -9,6 +9,7 @@
             }
         ]
     ],
+    "messages": [],
     "pickupableObjects": [],
     "playerStartPosition": {
         "cpVecY": 100,

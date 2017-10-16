@@ -31,6 +31,22 @@
             }
         ]
     ],
+    "messages": [
+        [
+            {
+                "cpVecY": 215,
+                "cpVecX": 670
+            },
+            "instruction_jump.png"
+        ],
+        [
+            {
+                "cpVecY": 200,
+                "cpVecX": 1120
+            },
+            "instruction_kick.png"
+        ]
+    ],
     "physicalObjects": [],
     "playerStartPosition": {
         "cpVecY": 100,
@@ -469,5 +485,13 @@
             }
         ]
     ],
-    "initEnemies": []
+    "initEnemies": [
+        [
+            "Mummy",
+            {
+                "cpVecY": 155,
+                "cpVecX": 1130
+            }
+        ]
+    ]
 }

@@ -16,6 +16,15 @@
             }
         ]
     ],
+    "messages": [
+        [
+            {
+                "cpVecY": 165,
+                "cpVecX": 270
+            },
+            "instruction_move.png"
+        ]
+    ],
     "physicalObjects": [],
     "playerStartPosition": {
         "cpVecY": 100,
