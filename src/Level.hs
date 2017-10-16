@@ -28,12 +28,16 @@ instance ToJSON PickupObjectType where
     toEncoding = genericToEncoding defaultOptions
 instance FromJSON PickupObjectType
 
+type Position = H.Vector
+type Size = H.Vector
+
 data LevelData = LevelData
-    { playerStartPosition :: H.Vector
-    , wallEdges :: [(H.Vector, H.Vector)]
-    , initEnemies :: [(EnemyType, H.Vector)]
-    , physicalObjects :: [(PhysicalObjectType, H.Vector)]
-    , pickupableObjects :: [(PickupObjectType, H.Vector)]
+    { playerStartPosition :: Position
+    , wallEdges :: [(Position, Position)]
+    , initEnemies :: [(EnemyType, Position)]
+    , physicalObjects :: [(PhysicalObjectType, Position)]
+    , pickupableObjects :: [(PickupObjectType, Position)]
+    , levelexits :: [(Position, Size, String, Position)]
     } deriving (Generic, Show, Eq)
 
 instance ToJSON LevelData where
@@ -65,4 +69,5 @@ testLevel =
        , initEnemies = [(Mummy, H.Vector 110 200)]
        , physicalObjects = [(Ball, H.Vector 200 20)]
        , pickupableObjects = []
+       , levelexits = []
        }

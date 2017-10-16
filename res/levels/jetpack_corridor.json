@@ -1,4 +1,21 @@
 {
+    "levelexits" : [
+        [
+            {
+                "cpVecY": 50,
+                "cpVecX": 120
+            },
+            {
+                "cpVecY": 80,
+                "cpVecX": 70
+            },
+            "cave_entrance.json",
+            {
+                "cpVecY": 120,
+                "cpVecX": 1290
+            }
+        ]
+    ],
     "physicalObjects": [],
     "playerStartPosition": {
         "cpVecY": 100,

@@ -1,4 +1,36 @@
 {
+    "levelexits" : [
+        [
+            {
+                "cpVecY": 60,
+                "cpVecX": 1350
+            },
+            {
+                "cpVecY": 80,
+                "cpVecX": 60
+            },
+            "jetpack_corridor.json",
+            {
+                "cpVecY": 100,
+                "cpVecX": 240
+            }
+        ],
+        [
+            {
+                "cpVecY": 55,
+                "cpVecX": 100
+            },
+            {
+                "cpVecY": 80,
+                "cpVecX": 60
+            },
+            "start.json",
+            {
+                "cpVecY": 35,
+                "cpVecX": 680
+            }
+        ]
+    ],
     "physicalObjects": [],
     "playerStartPosition": {
         "cpVecY": 100,

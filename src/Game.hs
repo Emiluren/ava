@@ -8,6 +8,7 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Aeson.Encode.Pretty as Aeson
 import Data.Bool (bool)
 import qualified Data.ByteString.Lazy.Char8 as BS
+import Data.Foldable (asum)
 import Data.List (find)
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
@@ -33,7 +34,10 @@ import MonadGame
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
 
-newtype PlayerState = PlayerState { playerStartsWithJetpack :: Bool } deriving (Eq, Show)
+data PlayerState = PlayerState
+    { playerStartsWithJetpack :: Bool
+    , playerStatePosition :: Maybe H.Vector
+    } deriving (Eq, Show)
 data QuitData = Exit | Loadlevel String PlayerState deriving (Eq, Show)
 
 data LogicOutput t = LogicOutput
@@ -461,11 +465,25 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             name <- getLine
             putStr "Have jetpack? "
             keep <- getLine
-            return $ Loadlevel name $ PlayerState (keep == "y")
+            return $ Loadlevel name $ PlayerState (keep == "y") Nothing
+        currentLevelExits = levelexits <$> current currentLevelData
+        playerInside jp (H.Vector px py) (H.Vector ex ey, H.Vector ew eh, name, initPos)
+            | px < ex = Nothing
+            | py < ey = Nothing
+            | px > ex + ew = Nothing
+            | py > ey + eh = Nothing
+            | otherwise = Just $ Loadlevel name $ PlayerState jp (Just initPos)
+        getExitData _ = do
+            pos <- sample playerPosition
+            exits <- sample currentLevelExits
+            hasJet <- sample playerHasJetpack
+            return $ asum $ playerInside hasJet pos <$> exits
 
     performEvent_ $ liftIO (putStrLn "Restarting level") <$ eRPressed
 
     eCtrlLPressed <- ffilter id <$> performEvent (ctrlPressed <$ eLPressed)
+    eCheckForLevelExit <- tickLossy (1/15) startTime
+
     eLoadLevel <- performEvent $ promptForLevel <$ eCtrlLPressed
 
     return LogicOutput
@@ -480,5 +498,6 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             [ Exit <$ eQPressed
             , Loadlevel levelName initialPlayerState <$ eRPressed
             , eLoadLevel
+            , push getExitData eCheckForLevelExit
             ]
         }

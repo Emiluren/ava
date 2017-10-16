@@ -15,7 +15,7 @@ import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Sum ((==>), DSum(..))
 import Data.Fixed (div')
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
 import qualified Data.Vector as Vector
@@ -108,8 +108,8 @@ mutableBehavior startValue = do
     value <- runHostFrame $ hold startValue eUpdateValue
     return (value, fireEventRef eUpdateValueTriggerRef)
 
-initLevel :: FunPtr Spriter.ImageLoader -> FunPtr Spriter.Renderer -> LevelData -> IO LevelLoadedData
-initLevel imgloader renderf levelData = do
+initLevel :: FunPtr Spriter.ImageLoader -> FunPtr Spriter.Renderer -> LevelData -> Maybe H.Vector -> IO LevelLoadedData
+initLevel imgloader renderf levelData altStartPos = do
     putStrLn "Creating chipmunk space"
     space <- H.newSpace
     H.gravity space $= H.Vector 0 400
@@ -174,7 +174,7 @@ initLevel imgloader renderf levelData = do
             Zombie ->
                 error "Zombies not implemented!"
 
-    H.position playerBody $= playerStartPosition levelData
+    H.position playerBody $= fromMaybe (playerStartPosition levelData) altStartPos
     H.collisionType playerFeetShape $= playerFeetCollisionType
 
     putStrLn "Loaded level"
@@ -206,7 +206,7 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
             mLevel <- Aeson.eitherDecode <$> BS.readFile ("res/levels/" ++ levelName)
             case mLevel of
                 Right level -> do
-                    levelData <- initLevel imgloader renderf level
+                    levelData <- initLevel imgloader renderf level $ playerStatePosition playerState
                     return (levelData, levelName, playerState)
                 Left string -> error $ "Could not parse level: " ++ string
 
@@ -218,7 +218,7 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
 
     rec
         eLevelLoaded <- performEvent $ leftmost
-            [ loadTestLevel "jetpack_corridor.json" (PlayerState False) <$ eInit
+            [ loadTestLevel "jetpack_corridor.json" (PlayerState False Nothing) <$ eInit
             , uncurry loadTestLevel <$> eSwitchGameMode
             ]
 
