@@ -45,12 +45,17 @@ aiDirToDirection AiStay = Nothing
 aiDirToDirection AiLeft = Just DLeft
 aiDirToDirection AiRight = Just DRight
 
+type CharacterPhysicsRefs = (Ptr H.Shape, Ptr H.Shape)
+
 data CharacterOutput t = CharacterOutput
     { characterSurfaceVelocity :: Behavior t H.Vector
     , characterForce :: Behavior t H.Vector
     , characterDirection :: Behavior t Direction
     , characterAnimation :: Behavior t String
     , characterRendering :: Behavior t [ Renderable ]
+    , characterHealth :: Dynamic t Int
+    , characterAttack :: Event t (Ptr H.Body, Int)
+    , characterRefsAndSprite :: (CharacterPhysicsRefs, Ptr Spriter.CEntityInstance)
     }
 
 queryLineSeg :: Ptr H.Space -> (H.Vector, H.Vector) -> H.ShapeFilter -> IO H.SegmentQueryInfo
@@ -61,8 +66,6 @@ data DebugRenderSettings = DebugRenderSettings
     , debugRenderCharacterShapes :: Bool
     , debugRenderCharacterChecks :: Bool
     }
-
-type CharacterPhysicsRefs = (Ptr H.Shape, Ptr H.Shape)
 
 makeCharacterBody :: H.CpFloat -> H.CpFloat -> [H.Vector]
 makeCharacterBody w h =
@@ -177,7 +180,7 @@ debugRenderCharacter debugSettings renderFeetAndBody renderSideChecks = do
              (False, True) -> renderSideChecks
              (True, True) -> renderFeetAndBody <> renderSideChecks
 
-attackEffect :: Ptr H.Space -> H.Vector -> Direction -> H.CpFloat -> (Ptr H.Shape -> Ptr H.Body -> IO Bool) -> IO Bool
+attackEffect :: Ptr H.Space -> H.Vector -> Direction -> H.CpFloat -> (Ptr H.Shape -> Ptr H.Body -> IO (Maybe (Ptr H.Body))) -> IO (Maybe (Ptr H.Body))
 attackEffect space pos dir imp onHit = do
     let (pkc1, pkc2) = case dir of
             DRight -> playerKickCheckR
@@ -194,7 +197,7 @@ attackEffect space pos dir imp onHit = do
         H.applyImpulse hitBody attackVec H.zero
         onHit hitShape hitBody
     else
-        return False
+        return Nothing
 
 aiCharacterNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
@@ -202,13 +205,14 @@ aiCharacterNetwork :: forall t m. MonadGame t m =>
     Ptr H.Body ->
     Event t TickInfo ->
     Event t () ->
+    Event t (Ptr H.Body, Int) ->
     Dynamic t Time.NominalDiffTime ->
     Behavior t H.Vector ->
     Behavior t DebugRenderSettings ->
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t)
-aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics gameTime playerPosition debugSettings (feetShape, bodyShape) sprite = do
+aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics eTakeDamage gameTime playerPosition debugSettings (feetShape, bodyShape) sprite = do
     let speedForAnim "Run" = playerSpeed / 3
         speedForAnim _ = playerSpeed / 6
 
@@ -236,14 +240,14 @@ aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics gameTime pl
 
         clock = clockLossy (1/60) startTime
 
-        mummyPunchEffect :: H.Vector -> Direction -> Performable m Bool
+        mummyPunchEffect :: H.Vector -> Direction -> Performable m (Maybe (Ptr H.Body))
         mummyPunchEffect position dir =
             liftIO $ attackEffect space position dir 500
                 (\_ hitBody ->
                      if hitBody == playerBody then
-                         putStrLn "punched player" >> return True
+                         putStrLn "punched player" >> return (Just playerBody)
                      else
-                         return False)
+                         return Nothing)
 
 
     body <- get $ H.shapeBody feetShape
@@ -398,12 +402,18 @@ aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics gameTime pl
 
             debugRenderCharacter debugSettings renderFeetAndBody renderSideChecks
 
+    health <- foldDyn (+) 100 $ negate <$>
+        fmapMaybe (\(b, d) -> if b == body then Just d else Nothing) eTakeDamage
+
     return CharacterOutput
         { characterSurfaceVelocity = mummySurfaceVelocity
         , characterForce = pure H.zero
         , characterDirection = mummyDisplayDir
         , characterAnimation = mummyAnimation
         , characterRendering = aiAnimation <> renderColDebug
+        , characterAttack = (playerBody, 40) <$ fmapMaybe id eHitPlayer
+        , characterHealth = health
+        , characterRefsAndSprite = ((feetShape, bodyShape), sprite)
         }
 
 particleSpawnInterval :: Time.NominalDiffTime
@@ -433,6 +443,7 @@ playerNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
     Ptr H.Space ->
     EventSelector t SdlEventTag ->
+    Event t Int ->
     Dynamic t Time.NominalDiffTime ->
     Behavior t Bool ->
     Behavior t Bool ->
@@ -447,7 +458,7 @@ playerNetwork :: forall t m. MonadGame t m =>
     Ptr Spriter.CEntityInstance ->
     (SDL.Texture, SDL.Texture) ->
     m (CharacterOutput t)
-playerNetwork startTime space sdlEventFan gameTime hasJetpack notEditing pressedKeys (pos, velocity) onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite (jetpackTex, particleTex) = do
+playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEditing pressedKeys (pos, velocity) onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite (jetpackTex, particleTex) = do
     let pressEvent kc = gate notEditing $ ffilter isPress $ select sdlEventFan (KeyEvent kc)
         eAPressed = pressEvent SDL.KeycodeA
         eDPressed = pressEvent SDL.KeycodeD
@@ -475,14 +486,14 @@ playerNetwork startTime space sdlEventFan gameTime hasJetpack notEditing pressed
 
         jump imp = liftIO $ H.applyImpulse body (H.Vector 0 imp) H.zero
 
-        playerKickEffect :: H.Vector -> Direction -> [(Ptr H.Shape, Ptr H.Shape)] -> Performable m Bool
+        playerKickEffect :: H.Vector -> Direction -> [(Ptr H.Shape, Ptr H.Shape)] -> Performable m (Maybe (Ptr H.Body))
         playerKickEffect playerP playerD currentAiShapes = do
             currentAiBodies <- mapM (get . H.shapeBody) $ fst <$> currentAiShapes
             liftIO $ attackEffect space playerP playerD 1000
                 (\_ hitBody -> if hitBody `elem` currentAiBodies then
-                        putStrLn "Kicked mummy" >> return True
+                        putStrLn "Kicked mummy" >> return (Just hitBody)
                     else
-                        return False)
+                        return Nothing)
 
     ePollInput <- tickLossy (1/15) startTime
     eCurrentInput <- performEvent $ pollInput mGamepad <$ gate notEditing ePollInput
@@ -527,7 +538,7 @@ playerNetwork startTime space sdlEventFan gameTime hasJetpack notEditing pressed
         ]
 
     performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ ePlayerKick
-    hitEnemy <- performEvent $ playerKickEffect <$> pos <*> playerDir <*> aiShapes <@ eDelayedPlayerKick
+    eHitEnemy <- performEvent $ playerKickEffect <$> pos <*> playerDir <*> aiShapes <@ eDelayedPlayerKick
 
     performEvent_ $ jump <$> jumpEvent
 
@@ -611,6 +622,8 @@ playerNetwork startTime space sdlEventFan gameTime hasJetpack notEditing pressed
             forM (particleState currentTime <$> pars) $ \(p, angle) ->
                 return $ StaticSprite particleTex p angle
 
+    health <- foldDyn (+) 100 $ negate <$> eTakeDamage
+
     return CharacterOutput
         { characterSurfaceVelocity = playerSurfaceVelocity
         , characterForce = playerForce
@@ -621,4 +634,7 @@ playerNetwork startTime space sdlEventFan gameTime hasJetpack notEditing pressed
                 <> renderJetpack
                 <> renderCharacter
                 <> renderColDebug
+        , characterHealth = health
+        , characterAttack = (\b -> (b, 30)) <$> fmapMaybe id eHitEnemy
+        , characterRefsAndSprite = ((feetShape, bodyShape), sprite)
         }

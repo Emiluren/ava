@@ -10,6 +10,7 @@ import Data.Bool (bool)
 import qualified Data.ByteString.Lazy.Char8 as BS
 import Data.Foldable (asum)
 import Data.List (find)
+import Data.Maybe (catMaybes)
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
@@ -193,10 +194,9 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 currentAiCharacters <- current aiCharacters
                 return $ sequenceA $ characterSurfaceVelocity <$> currentAiCharacters
 
-        aiShapesAndSprites :: Behavior t [(CharacterPhysicsRefs, Ptr Spriter.CEntityInstance)] <-
-            hold initialShapesAndSprites never
+        let aiShapesAndSprites = current $ fmap characterRefsAndSprite <$> aiCharacters
 
-        let aiShapes :: Behavior t [(Ptr H.Shape, Ptr H.Shape)]
+            aiShapes :: Behavior t [(Ptr H.Shape, Ptr H.Shape)]
             aiShapes = fmap fst <$> aiShapesAndSprites
 
             aiFeetShapes :: Behavior t [Ptr H.Shape]
@@ -206,6 +206,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             aiSprites = fmap snd <$> aiShapesAndSprites
 
             ePickUpJetpack = push isPlayerTouchingJetpack $ updated gameTime
+            ePlayerHurt = switchPromptlyDyn $ fmap leftmost $ fmap characterAttack <$> aiCharacters
 
         playerHasJetpack <- hold (playerStartsWithJetpack initialPlayerState) $ True <$ ePickUpJetpack
 
@@ -214,6 +215,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 startTime
                 space
                 sdlEventFan
+                (snd <$> ePlayerHurt)
                 gameTime
                 playerHasJetpack
                 notEditing
@@ -229,6 +231,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 (jetpackTex, particleTex)
 
         let initAiCharacter :: (Ptr H.Shape, Ptr H.Shape) -> Ptr Spriter.CEntityInstance -> m (CharacterOutput t)
+            ePlayerAttack = characterAttack player
             initAiCharacter =
                      aiCharacterNetwork
                          startTime
@@ -236,14 +239,45 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                          playerBody
                          aiTick
                          (() <$ eSteppedPhysics)
+                         ePlayerAttack
                          gameTime
                          playerPosition
                          debugRenderSettings
 
+            thisCharacterDied character =
+                ffilter (<= 0) $ updated $ characterHealth character
+            eACharacterDied = switchPromptlyDyn $ leftmost . fmap thisCharacterDied <$> aiCharacters
+
+            removeCharacter :: CharacterOutput t -> IO ()
+            removeCharacter character = do
+                let ((feetShape, bodyShape), sprite) = characterRefsAndSprite character
+                body <- get $ H.shapeBody feetShape
+                putStr "Removing "
+                print (feetShape, bodyShape, body)
+                H.spaceRemoveShape space feetShape
+                H.spaceRemoveShape space bodyShape
+                H.spaceRemoveBody space body
+                -- TODO: release allocated memory
+
+            removeDeadCharacters :: [ CharacterOutput t ] -> [ Int ] -> Performable m [ CharacterOutput t ]
+            removeDeadCharacters currentCharacters currentHealths =
+                fmap catMaybes $ forM (zip currentCharacters currentHealths) $ \(character, health) ->
+                    if health > 0
+                        then return $ Just character
+                        else liftIO (removeCharacter character) >> return Nothing
+
+            characterHealths :: Behavior t [ Int ]
+            characterHealths = current $ join $ fmap sequenceA $ fmap characterHealth <$> aiCharacters
+
+        initialCharacters <- sequenceA $
+                uncurry initAiCharacter <$> zip initialAiShapes initialAiSprites
+
+        eDeadCharactersRemoved <-
+            performEvent (removeDeadCharacters <$> current aiCharacters <*> characterHealths <@ eACharacterDied)
+
+
         (aiCharacters :: Dynamic t [CharacterOutput t]) <-
-            holdGameMode
-                (sequenceA $ uncurry initAiCharacter <$> zip initialAiShapes initialAiSprites)
-                never
+            holdDyn initialCharacters eDeadCharactersRemoved
 
         eSteppedPhysics <- performEvent $ stepPhysics
             <$> characterSurfaceVelocity player
@@ -444,9 +478,8 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             <*> editing
 
         aiRendering :: Behavior t [Renderable]
-        aiRendering = do
-            currentAiCharacters <- current aiCharacters
-            fmap concat $ sequenceA $ characterRendering <$> currentAiCharacters
+        aiRendering =
+            join $ fmap mconcat $ current $ fmap characterRendering <$> aiCharacters
 
         renderJetpack :: Behavior t [Renderable]
         renderJetpack = do
@@ -494,6 +527,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
     let renderMessage (pos, texture) = pure $ StaticSprite texture pos 0
         renderMessages = sequenceA $ renderMessage <$> messageSprites
+        reloadLevel = Loadlevel levelName initialPlayerState
 
     return LogicOutput
         { cameraCenterPosition = cameraPosition
@@ -506,7 +540,8 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 <> renderMessages
         , quit = leftmost
             [ Exit <$ eQPressed
-            , Loadlevel levelName initialPlayerState <$ eRPressed
+            , reloadLevel <$ eRPressed
+            , reloadLevel <$ thisCharacterDied player
             , eLoadLevel
             , push getExitData eCheckForLevelExit
             ]
