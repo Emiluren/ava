@@ -18,8 +18,7 @@ import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust)
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
-
-import Debug.Trace
+import qualified Data.Vector.Storable as V
 
 import Foreign.C.String (CString, withCString, peekCString)
 import Foreign.C.Types (CDouble(..))
@@ -526,15 +525,22 @@ renderShape renderTexture (V2 (CDouble camX) (CDouble camY)) shape shapeType = d
     case shapeType of
         (H.Circle (CDouble radius) offset) -> liftIO $ do
 
-            let (H.Vector (CDouble px) (CDouble py)) = pos + H.rotate offset (H.fromAngle $ CDouble angle)
-                sdlPos = SFML.Vec2f (double2Float $ px - camX) (double2Float $ py - camY)
-                edgePoint = sdlPos + SFML.Vec2f
+            let (H.Vector (CDouble px) (CDouble py)) =
+                    pos + H.rotate offset (H.fromAngle $ CDouble angle)
+                centerPos@(V2 cx cy) = V2 (double2Float $ px - camX) (double2Float $ py - camY)
+                edgePoint = centerPos + V2
                     (double2Float $ cos angle * radius)
                     (double2Float $ sin angle * radius)
+                radF = double2Float radius
             Right circle <- SFML.createCircleShape
+            SFML.setRadius circle radF
+            SFML.setOutlineThickness circle 1
             SFML.setOutlineColor circle SFML.white
             SFML.setFillColor circle SFML.transparent
+            SFML.setOrigin circle $ SFML.Vec2f radF radF
+            SFML.setPosition circle $ SFML.Vec2f cx cy
             SFML.drawCircle renderTexture circle Nothing
+            drawLine renderTexture centerPos edgePoint
 
         (H.LineSegment p1 p2 _) -> do
             let camV = V2 camX camY
@@ -548,13 +554,12 @@ renderShape renderTexture (V2 (CDouble camX) (CDouble camY)) shape shapeType = d
                 Nothing
 
         (H.Polygon verts _radius) -> do
-            -- let camV = H.Vector camX camY
-            --     rot = H.rotate $ H.fromAngle angle
-            --     sdlVerts = map (\v -> rot v + pos - camV) $ V.toList verts
-            --SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
+            let camV = H.Vector (CDouble camX) (CDouble camY)
+                rot = H.rotate $ H.fromAngle (CDouble angle)
+                sdlVerts = fmap (fmap (double2Float . fromCDouble) . H.toV2) $
+                    map (\v -> rot v + pos - camV) $ V.toList verts
 
             -- Would crash if there was a polygon without vertices but that should be impossible
-            -- let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
-            -- forM_ edges $ uncurry (drawLine renderTexture)
+            let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
+            liftIO $ forM_ edges $ uncurry (drawLine renderTexture)
             --SDL.drawPoint textureRenderer $ convV $ pos - camV
-            liftIO $ putStrLn "Polygon rendering not implemented"
