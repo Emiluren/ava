@@ -36,6 +36,8 @@ executable ava
                      , src/jsonspriterfiledocumentwrapper.cpp
                      , src/jsonspriterfileattributewrapper.cpp
                      , src/jsonspriterfileelementwrapper.cpp
+  -- include-dirs:        ../../sfml/CSFML-2.3/include
+  -- extra-lib-dirs:      ../../sfml/CSFML-2.3/build/lib
   build-depends:       base >= 4.7 && < 5
                      , aeson
                      , aeson-pretty
@@ -53,9 +55,7 @@ executable ava
                      , random
                      , reflex
                      , ref-tf
-                     , sdl2 >= 2.1
-                     , sdl2-gfx
-                     , sdl2-image
+                     , SFML
                      , StateVar
                      , template-haskell
                      , these

@@ -18,11 +18,11 @@ import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust)
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
-import qualified Data.Vector as Vector
-import qualified Data.Vector.Storable as V
+
+import Debug.Trace
 
 import Foreign.C.String (CString, withCString, peekCString)
-import Foreign.C.Types (CInt, CFloat(..), CDouble(..))
+import Foreign.C.Types (CDouble(..))
 import Foreign.Ptr (Ptr, castPtr, freeHaskellFunPtr, FunPtr)
 import Foreign.StablePtr
     ( newStablePtr
@@ -33,7 +33,7 @@ import Foreign.StablePtr
     )
 import Foreign.Storable
 
-import GHC.Float (float2Double)
+import GHC.Float (double2Float)
 
 import Linear (V2(..), V4(..))
 
@@ -47,10 +47,8 @@ import Reflex.Host.Class
     , MonadReflexHost
     )
 
-import SDL (Point(P))
-import qualified SDL
-import qualified SDL.Image
-import qualified SDL.Primitive as SDL
+import qualified SFML.Graphics as SFML
+import qualified SFML.Window as SFML
 
 import System.IO (hSetBuffering, BufferMode(NoBuffering), stdout)
 
@@ -65,13 +63,13 @@ import Level
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
 
-cameraOffset :: MonadIO m => SDL.Window -> SDL.Renderer -> m (V2 Double)
-cameraOffset window textureRenderer = do
-    (V2 ww wh) <- get $ SDL.windowSize window
-    (V2 (CFloat rsx) (CFloat rsy)) <- get $ SDL.rendererScale textureRenderer
+cameraOffset :: SFML.Window -> IO (V2 Double)
+cameraOffset window = do
+    (SFML.Vec2u ww wh) <- SFML.getWindowSize window
+    --(V2 (CFloat rsx) (CFloat rsy)) <- get $ SDL.rendererScale textureRenderer
     return $ V2
-        (fromIntegral ww / 2 / float2Double rsx)
-        (fromIntegral wh / 2 / float2Double rsy)
+        (fromIntegral ww / 2)
+        (fromIntegral wh / 2)
 
 frameTime :: Double
 frameTime = 0.05
@@ -83,17 +81,19 @@ newtype RenderState = RenderState
     { cameraPosition :: V2 Double
     }
 
-sortEvent :: SDL.Event -> DMap SdlEventTag Identity
+sortEvent :: SFML.SFEvent -> DMap SfmlEventTag Identity
 sortEvent event =
-    wrapInDMap $ case SDL.eventPayload event of
-        SDL.ControllerDeviceEvent axis ->
-            ControllerDeviceEvent ==> axis
-        SDL.JoyAxisEvent eventData ->
-            JoyAxisEvent (SDL.joyAxisEventWhich eventData) ==> eventData
-        SDL.JoyButtonEvent eventData ->
-            JoyButtonEvent (SDL.joyButtonEventWhich eventData) ==> eventData
-        SDL.KeyboardEvent eventData ->
-            KeyEvent (eventKeycode eventData) ==> eventData
+    wrapInDMap $ case event of
+        SFML.SFEvtJoystickMoved { SFML.joystickId = joyId } ->
+            JoyAxisEvent joyId ==> event
+        SFML.SFEvtJoystickButtonPressed { SFML.joystickId = joyId } ->
+            JoyButtonEvent joyId ==> event
+        SFML.SFEvtJoystickButtonReleased { SFML.joystickId = joyId } ->
+            JoyButtonEvent joyId ==> event
+        SFML.SFEvtKeyPressed {} ->
+            KeyEvent ==> event
+        SFML.SFEvtKeyReleased {} ->
+            KeyEvent ==> event
         _ ->
             OtherEvent ==> event
     where wrapInDMap x = DMap.fromList [x]
@@ -192,13 +192,12 @@ mainReflex :: (MonadGame t m) =>
     FunPtr Spriter.ImageLoader ->
     FunPtr Spriter.Renderer ->
     Time.UTCTime ->
-    SDL.Renderer ->
-    EventSelector t SdlEventTag ->
+    EventSelector t SfmlEventTag ->
     Event t Int ->
-    Behavior t (SDL.Scancode -> Bool) ->
-    Maybe SDL.Joystick ->
+    Behavior t (SFML.KeyCode -> Bool) ->
+    Maybe JoystickID ->
     m (LogicOutput t)
-mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad = do
+mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mGamepad = do
     eInit <- getPostBuild
 
     let loadTestLevel levelName playerState = liftIO $ do
@@ -227,7 +226,6 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
             (return initialOutput)
             (initLevelNetwork
                 startTime
-                textureRenderer
                 sdlEventFan
                 eStepPhysics
                 pressedKeys
@@ -246,21 +244,28 @@ mainReflex imgloader renderf startTime textureRenderer sdlEventFan eStepPhysics 
         , quit = ffilter (== Exit) eGameModeQuit
         }
 
+pollEvents :: SFML.RenderWindow -> IO [ SFML.SFEvent ]
+pollEvents window = pollEvents' [] where
+    pollEvents' xs = do
+        mEvent <- SFML.pollEvent window
+        case mEvent of
+            Nothing -> return xs
+            Just x -> pollEvents' (x:xs)
+
 main :: IO ()
 main = do
     hSetBuffering stdout NoBuffering
-    SDL.initializeAll
 
-    let windowSettings = SDL.defaultWindow
-            { SDL.windowResizable = True
+    let videoMode = SFML.VideoMode
+            { SFML.windowWidth = 800
+            , SFML.windowHeight = 600
+            , SFML.windowBPP = 32
             }
-    window <- SDL.createWindow "Ava" windowSettings
-    textureRenderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
-        { SDL.rendererTargetTexture = True
-        }
 
-    renderTexture <- SDL.createTexture textureRenderer
-        SDL.RGBA8888 SDL.TextureAccessTarget (V2 renderTextureSize renderTextureSize)
+    window <- SFML.createRenderWindow videoMode "Ava" [ SFML.SFResize ] Nothing
+    Right renderTexture <- SFML.createRenderTexture renderTextureSize renderTextureSize False
+
+    -- SFML.setTexture renderTextureSprite renderTexture True
 
     loadedImages <- newIORef []
 
@@ -268,7 +273,7 @@ main = do
         loadImage filename pivotX pivotY = do
             name <- peekCString filename
 
-            tex <- SDL.Image.loadTexture textureRenderer name
+            tex <- loadSprite name
             putStrLn $ "Loaded: " ++ name
 
             let sprite = Spriter.Sprite
@@ -284,16 +289,16 @@ main = do
             return $ castPtr $ castStablePtrToPtr stablePtr
 
     imgloader <- Spriter.makeImageLoader loadImage
-    renderf <- Spriter.makeRenderer $ renderSprite textureRenderer
+    renderf <- Spriter.makeRenderer $ renderSprite renderTexture
 
     Spriter.setErrorFunction
 
     let
         render :: MonadIO m => V2 CDouble -> [Renderable] -> m ()
-        render camOffset renderables = do
-            SDL.rendererRenderTarget textureRenderer $= Just renderTexture
-            SDL.rendererDrawColor textureRenderer $= V4 55 60 55 255
-            SDL.clear textureRenderer
+        render camOffset renderables = liftIO $ do
+            --SDL.rendererRenderTarget softwareRenderer $= Just renderTexture
+            SFML.clear renderTexture (SFML.Color 55 60 55 255)
+            True <- SFML.setActive renderTexture True
 
             liftIO $ forM_ renderables $ \renderable ->
                 case renderable of
@@ -307,35 +312,48 @@ main = do
                         -- Sprite won't be in the right place unless it's updated
                         Spriter.setEntityInstanceTimeElapsed entityInstance 0
                         Spriter.renderEntityInstance entityInstance
-                    StaticSprite texture pos angle -> do
-                        textureInfo <- SDL.queryTexture texture
-                        let px = SDL.textureWidth textureInfo `div` 2
-                            py = SDL.textureHeight textureInfo `div` 2
-                            center = SDL.P $ SDL.V2 px py
-                            V2 x y = pos - camOffset
-                            texSize = V2 (SDL.textureWidth textureInfo) (SDL.textureHeight textureInfo)
-                            renderRect = SDL.Rectangle
-                                (SDL.P $ V2 (floor x - px) (floor y - py))
-                                texSize
-                        SDL.copyEx textureRenderer texture Nothing (Just renderRect) angle (Just center) (V2 False False)
+                    StaticSprite sprite pos (CDouble angle) -> do
+                        Just texture <- SFML.getTexture sprite
+                        SFML.Vec2u w h <- SFML.textureSize texture
+                        let px = w `div` 2
+                            py = h `div` 2
+                            V2 (CDouble x) (CDouble y) = pos - camOffset
+                        SFML.setOrigin sprite $ SFML.Vec2f (fromIntegral px) (fromIntegral py)
+                        SFML.setPosition sprite (SFML.Vec2f (double2Float x) (double2Float y))
+                        SFML.setRotation sprite (double2Float angle)
+                        SFML.drawSprite renderTexture sprite Nothing
                     Line color p1 p2 -> do
-                        let (V2 x1 y1) = p1 - camOffset
-                            (V2 x2 y2) = p2 - camOffset
-                        SDL.rendererDrawColor textureRenderer $= color
-                        SDL.drawLine textureRenderer
-                            (SDL.P $ V2 (floor x1) (floor y1))
-                            (SDL.P $ V2 (floor x2) (floor y2))
+                        let (V2 x1 y1) = fmap (double2Float . fromCDouble) $ p1 - camOffset
+                            (V2 x2 y2) = fmap (double2Float . fromCDouble) $ p2 - camOffset
+                            V4 r g b a = color
+                            c = SFML.Color r g b a
+                        SFML.drawPrimitives renderTexture
+                            [ SFML.Vertex (SFML.Vec2f x1 y1) c (SFML.Vec2f 0 0)
+                            , SFML.Vertex (SFML.Vec2f x2 y2) c (SFML.Vec2f 0 0)
+                            ]
+                            SFML.Lines
+                            Nothing
                     Shape shape shapeType ->
-                        renderShape textureRenderer camOffset shape shapeType
+                        renderShape renderTexture camOffset shape shapeType
 
-            SDL.rendererRenderTarget textureRenderer $= Nothing
-            (V2 ww wh) <- get $ SDL.windowSize window
-            let dispHeight = floor (renderTextureSize / fromIntegral ww * fromIntegral wh :: Float)
-                renderRect = SDL.Rectangle
-                    (SDL.P $ V2 0 $ (renderTextureSize - dispHeight) `div` 2)
-                    (V2 renderTextureSize dispHeight)
-            SDL.copy textureRenderer renderTexture (Just renderRect) Nothing
-            SDL.present textureRenderer
+            SFML.display renderTexture
+            True <- SFML.setActive renderTexture False
+            --SDL.rendererRenderTarget textureRenderer $= Nothing
+            --renderTexture <- SDL.createTextureFromSurface screenRenderer renderingSurface
+            (SFML.Vec2u ww wh) <- SFML.getWindowSize window
+            let scale = fromIntegral ww / renderTextureSize
+                renderPos = SFML.Vec2f 0 $ fromIntegral wh * (1 - scale) / 2
+                -- renderSize = V2 renderTextureSize dispHeight
+
+            Right renderTextureSprite <- SFML.createSprite
+            tex <- SFML.getRenderTexture renderTexture
+            SFML.setTexture renderTextureSprite tex True
+            SFML.setPosition renderTextureSprite renderPos
+            SFML.setScale renderTextureSprite (SFML.Vec2f scale scale)
+
+            SFML.drawSprite window renderTextureSprite Nothing
+            SFML.display window
+            SFML.destroy renderTextureSprite
 
     runSpiderHost $ do
         (eSdlEvent, sdlTriggerRef) <- newEventWithTriggerRef
@@ -344,19 +362,30 @@ main = do
 
         startTime <- liftIO Time.getCurrentTime
 
-        (pressedKeys, setPressedKeys) <- mutableBehavior =<< SDL.getKeyboardState
+        let getKeyboardState = liftIO $ do
+                wPressed <- SFML.isKeyPressed SFML.KeyW
+                aPressed <- SFML.isKeyPressed SFML.KeyA
+                sPressed <- SFML.isKeyPressed SFML.KeyS
+                dPressed <- SFML.isKeyPressed SFML.KeyD
+                iPressed <- SFML.isKeyPressed SFML.KeyI
 
-        joysticks <- SDL.availableJoysticks
-        mGamepad <- if null joysticks
-            then return Nothing
-            else Just <$> SDL.openJoystick (Vector.head joysticks)
+                let pressed SFML.KeyW = wPressed
+                    pressed SFML.KeyA = aPressed
+                    pressed SFML.KeyS = sPressed
+                    pressed SFML.KeyD = dPressed
+                    pressed SFML.KeyI = iPressed
+
+                return pressed
+
+        (pressedKeys, setPressedKeys) <- mutableBehavior =<< getKeyboardState
+
+        mGamepad <- (\b -> if b then Just 0 else Nothing) <$> liftIO (SFML.isJoystickConnected 0)
 
         let sdlEventFan = fan eSdlEvent
             mainReflexWithParameters = mainReflex
                 imgloader
                 renderf
                 startTime
-                textureRenderer
                 sdlEventFan
                 eStepPhysics
                 pressedKeys
@@ -386,17 +415,23 @@ main = do
                             readEvent hQuit >>= sequence
                         when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
 
-                setPressedKeys =<< SDL.getKeyboardState
+                setPressedKeys =<< getKeyboardState
 
                 mSdlTrigger <- liftIO $ readIORef sdlTriggerRef
                 case mSdlTrigger of
                     Nothing -> return ()
                     Just sdlTrigger -> do
-                        events <- SDL.pollEvents
-                        let triggerSdlEvent evt = sdlTrigger :=> Identity (sortEvent evt)
-                        lmQuit <- fire (fmap triggerSdlEvent events) $
-                            readEvent hQuit >>= sequence
-                        when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
+                        events <- liftIO $ pollEvents window
+                        -- let triggerSdlEvent evt = sdlTrigger :=> Identity (sortEvent evt)
+                        -- lmQuit <- fire (fmap triggerSdlEvent events) $
+                        --     readEvent hQuit >>= sequence
+                        -- when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
+                        forM_ events $ \evt -> do
+                            let triggerList = [sdlTrigger :=> Identity (sortEvent evt)]
+                                readPhase = readEvent hQuit >>= sequence
+                            lmQuit <- fire triggerList readPhase
+                            when (any isJust lmQuit) $ liftIO $ writeIORef quitRef True
+
 
                 eventTriggers <- liftIO $ Chan.readChan eventChan
                 forM_ eventTriggers $ \(EventTriggerRef triggerRef :=> TriggerInvocation value onComplete) -> do
@@ -429,13 +464,13 @@ main = do
         appLoop startTime 0.0
 
     spriterImages <- readIORef loadedImages
-    forM_ spriterImages $ \sprPtr -> do
-        spr <- deRefStablePtr sprPtr
-        let tex = spr ^. Spriter.spriteTexture
-        SDL.destroyTexture tex
-        freeStablePtr sprPtr
+    -- forM_ spriterImages $ \sprPtr -> do
+    --     spr <- deRefStablePtr sprPtr
+    --     let tex = spr ^. Spriter.spriteTexture
+    --     SDL.destroyTexture tex
+    --     freeStablePtr sprPtr
 
-    SDL.quit
+    -- SDL.quit
 
     -- free playerEntityInstance
     -- free playerSpriterModel
@@ -445,65 +480,81 @@ main = do
     freeHaskellFunPtr renderf
     -- H.freeSpace space
 
-renderSprite :: SDL.Renderer -> Spriter.Renderer
-renderSprite textureRenderer spritePtr spriteStatePtr = do
+renderSprite :: SFML.RenderTexture -> Spriter.Renderer
+renderSprite renderTexture spritePtr spriteStatePtr = do
     sprite <- deRefStablePtr $ castPtrToStablePtr $ castPtr spritePtr
     spriteState <- peek spriteStatePtr
 
-    textureInfo <- SDL.queryTexture $ sprite ^. Spriter.spriteTexture
+    let sfmlSprite = sprite ^. Spriter.spriteTexture
+    Just texture <- SFML.getTexture sfmlSprite
+    SFML.Vec2u w h <- SFML.textureSize texture
     -- TODO: alpha is not used
-    let wallShape = fromIntegral $ SDL.textureWidth textureInfo
-        h = fromIntegral $ SDL.textureHeight textureInfo
-        scaleX = spriteState ^. Spriter.spriteStateScale . Spriter.pointX
+    let scaleX = spriteState ^. Spriter.spriteStateScale . Spriter.pointX
         scaleY = spriteState ^. Spriter.spriteStateScale . Spriter.pointY
-        sw = floor $ scaleX * wallShape
-        sh = floor $ scaleY * h
-        px = floor $ (sprite ^. Spriter.spritePivotX) * fromIntegral sw
-        py = floor $ (sprite ^. Spriter.spritePivotY) * fromIntegral sh
-        pivot = Just $ SDL.P $ V2 px py
+        (CDouble px) = (sprite ^. Spriter.spritePivotX) * fromIntegral w
+        (CDouble py) = (sprite ^. Spriter.spritePivotY) * fromIntegral h
+        pivot = SFML.Vec2f (double2Float px) (double2Float py)
         angle = spriteState ^. Spriter.spriteStateAngle
         degAngle = angle * (180/pi)
-        x = floor $ spriteState ^. Spriter.spriteStatePosition . Spriter.pointX - fromIntegral px
-        y = floor $ spriteState ^. Spriter.spriteStatePosition . Spriter.pointY - fromIntegral py
-        texture = sprite ^. Spriter.spriteTexture
-        renderRect = SDL.Rectangle (SDL.P $ V2 x y) (V2 sw sh)
-    SDL.copyEx
-        textureRenderer texture Nothing (Just renderRect) (CDouble degAngle) pivot (V2 False False)
+        x = double2Float $ spriteState ^. Spriter.spriteStatePosition . Spriter.pointX
+        y = double2Float $ spriteState ^. Spriter.spriteStatePosition . Spriter.pointY
 
-convV :: H.Vector -> SDL.Point V2 CInt
-convV (H.Vector x y) = SDL.P $ V2 (floor x) (floor y)
+    SFML.setOrigin sfmlSprite pivot
+    SFML.setScale sfmlSprite (SFML.Vec2f (double2Float scaleX) (double2Float scaleY))
+    SFML.setRotation sfmlSprite (double2Float degAngle)
+    SFML.setPosition sfmlSprite (SFML.Vec2f x y)
+    SFML.drawSprite renderTexture sfmlSprite Nothing
 
-renderShape :: MonadIO m => SDL.Renderer -> V2 CDouble -> Ptr H.Shape -> H.ShapeType -> m ()
-renderShape textureRenderer (V2 camX camY) shape shapeType = do
+drawLine :: SFML.RenderTexture -> V2 Float -> V2 Float -> IO ()
+drawLine renderTexture p1 p2 =
+    let (V2 x1 y1) = p1
+        (V2 x2 y2) = p2
+    in SFML.drawPrimitives renderTexture
+       [ SFML.Vertex (SFML.Vec2f x1 y1) SFML.white (SFML.Vec2f 0 0)
+       , SFML.Vertex (SFML.Vec2f x2 y2) SFML.white (SFML.Vec2f 0 0)
+       ] SFML.Lines Nothing
+
+fromCDouble :: CDouble -> Double
+fromCDouble (CDouble x) = x
+
+renderShape :: MonadIO m => SFML.RenderTexture -> V2 CDouble -> Ptr H.Shape -> H.ShapeType -> m ()
+renderShape renderTexture (V2 (CDouble camX) (CDouble camY)) shape shapeType = do
     body <- get $ H.shapeBody shape
     pos <- get $ H.position body
-    angle <- get $ H.angle body
+    (CDouble angle) <- get $ H.angle body
 
     case shapeType of
-        (H.Circle radius offset) -> do
+        (H.Circle (CDouble radius) offset) -> liftIO $ do
 
-            let (H.Vector px py) = pos + H.rotate offset (H.fromAngle angle)
-                sdlPos = V2 (floor $ px - camX) (floor $ py - camY)
-                edgePoint = SDL.P $ sdlPos + V2
-                    (floor $ cos angle * radius)
-                    (floor $ sin angle * radius)
-
-            SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
-            SDL.circle textureRenderer sdlPos (floor radius) (V4 255 255 255 255)
-            SDL.drawLine textureRenderer (SDL.P sdlPos) edgePoint
+            let (H.Vector (CDouble px) (CDouble py)) = pos + H.rotate offset (H.fromAngle $ CDouble angle)
+                sdlPos = SFML.Vec2f (double2Float $ px - camX) (double2Float $ py - camY)
+                edgePoint = sdlPos + SFML.Vec2f
+                    (double2Float $ cos angle * radius)
+                    (double2Float $ sin angle * radius)
+            Right circle <- SFML.createCircleShape
+            SFML.setOutlineColor circle SFML.white
+            SFML.setFillColor circle SFML.transparent
+            SFML.drawCircle renderTexture circle Nothing
 
         (H.LineSegment p1 p2 _) -> do
-            SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
-            let camV = H.Vector camX camY
-            SDL.drawLine textureRenderer (convV $ p1 + pos - camV) (convV $ p2 + pos - camV)
+            let camV = V2 camX camY
+                (V2 x1 y1) = fmap double2Float $ (fromCDouble <$> H.toV2 (p1 + pos)) - camV
+                (V2 x2 y2) = fmap double2Float $ (fromCDouble <$> H.toV2 (p2 + pos)) - camV
+            liftIO $ SFML.drawPrimitives renderTexture
+                [ SFML.Vertex (SFML.Vec2f x1 y1) SFML.white (SFML.Vec2f 0 0)
+                , SFML.Vertex (SFML.Vec2f x2 y2) SFML.white (SFML.Vec2f 0 0)
+                ]
+                SFML.Lines
+                Nothing
 
         (H.Polygon verts _radius) -> do
-            let camV = H.Vector camX camY
-                rot = H.rotate $ H.fromAngle angle
-                sdlVerts = map (\v -> convV $ rot v + pos - camV) $ V.toList verts
-            SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
+            -- let camV = H.Vector camX camY
+            --     rot = H.rotate $ H.fromAngle angle
+            --     sdlVerts = map (\v -> rot v + pos - camV) $ V.toList verts
+            --SDL.rendererDrawColor textureRenderer $= V4 255 255 255 255
 
             -- Would crash if there was a polygon without vertices but that should be impossible
-            let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
-            forM_ edges $ uncurry (SDL.drawLine textureRenderer)
-            SDL.drawPoint textureRenderer $ convV $ pos - camV
+            -- let edges = zip sdlVerts $ tail sdlVerts ++ [head sdlVerts]
+            -- forM_ edges $ uncurry (drawLine renderTexture)
+            --SDL.drawPoint textureRenderer $ convV $ pos - camV
+            liftIO $ putStrLn "Polygon rendering not implemented"

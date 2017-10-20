@@ -19,7 +19,8 @@ import Linear (V2(..), V4(..), (*^))
 import Reflex
 import Reflex.Time
 
-import qualified SDL
+import qualified SFML.Graphics as SFML
+import qualified SFML.Window as SFML
 
 import System.Random (newStdGen, randomRs)
 
@@ -442,40 +443,40 @@ particleAlive gameTime particle =
 playerNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
     Ptr H.Space ->
-    EventSelector t SdlEventTag ->
+    EventSelector t SfmlEventTag ->
     Event t Int ->
     Dynamic t Time.NominalDiffTime ->
     Behavior t Bool ->
     Behavior t Bool ->
-    Behavior t (SDL.Scancode -> Bool) ->
+    Behavior t (SFML.KeyCode -> Bool) ->
     (Behavior t H.Vector, Behavior t H.Vector) ->
     Behavior t Bool ->
     Behavior t [(Ptr H.Shape, Ptr H.Shape)] ->
     Behavior t DebugRenderSettings ->
-    Maybe SDL.Joystick ->
+    Maybe JoystickID ->
     Ptr H.Body ->
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
-    (SDL.Texture, SDL.Texture) ->
+    (SFML.Sprite, SFML.Sprite) ->
     m (CharacterOutput t)
 playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEditing pressedKeys (pos, velocity) onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite (jetpackTex, particleTex) = do
-    let pressEvent kc = gate notEditing $ ffilter isPress $ select sdlEventFan (KeyEvent kc)
-        eAPressed = pressEvent SDL.KeycodeA
-        eDPressed = pressEvent SDL.KeycodeD
-        eWPressed = pressEvent SDL.KeycodeW
-        eKPressed = pressEvent SDL.KeycodeK
+    let pressEvent kc = gate notEditing $ ffilter (isKeyPressed kc) $ select sdlEventFan KeyEvent
+        eAPressed = pressEvent SFML.KeyA
+        eDPressed = pressEvent SFML.KeyD
+        eWPressed = pressEvent SFML.KeyW
+        eKPressed = pressEvent SFML.KeyK
         ePadButtonPress = gate notEditing $ select sdlEventFan (JoyButtonEvent 0)
         ePadAxisMove = gate notEditing $ select sdlEventFan (JoyAxisEvent 0)
         padFilterButtonPress b = ffilter
-            (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) ePadButtonPress
+            (\(SFML.SFEvtJoystickButtonPressed b' _) -> b == b') ePadButtonPress
         ePadAPressed = padFilterButtonPress padButtonA
         ePadXPressed = padFilterButtonPress padButtonX
         ePadNotCenter = ffilter
-            (\(SDL.JoyAxisEventData _ a v) ->
-                 a == padXAxis &&
-                abs (axisValue v) > 0.15)
+            (\(SFML.SFEvtJoystickMoved _ a v) ->
+                 a == SFML.JoystickY &&
+                abs v > 0.15)
             ePadAxisMove
-        ePadChangeDir = (\(SDL.JoyAxisEventData _ _ v) -> if v > 0 then DRight else DLeft)
+        ePadChangeDir = (\(SFML.SFEvtJoystickMoved _ _ v) -> if v > 0 then DRight else DLeft)
             <$> ePadNotCenter
 
         ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
@@ -499,9 +500,9 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
     eCurrentInput <- performEvent $ pollInput mGamepad <$ gate notEditing ePollInput
     gamepadInput <- hold initialInput eCurrentInput
 
-    let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
-        dPressed = ($ SDL.ScancodeD) <$> pressedKeys
-        iPressed = ($ SDL.ScancodeI) <$> pressedKeys
+    let aPressed = ($ SFML.KeyA) <$> pressedKeys
+        dPressed = ($ SFML.KeyD) <$> pressedKeys
+        iPressed = ($ SFML.KeyI) <$> pressedKeys
         playerKeyMovement = controlVx 1 <$> aPressed <*> dPressed
         playerAxisMovement = leftXAxis <$> gamepadInput
         yHeld = yPressed <$> gamepadInput

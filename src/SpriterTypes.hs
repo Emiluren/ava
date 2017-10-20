@@ -14,7 +14,7 @@ import Language.C.Types (TypeSpecifier(..))
 
 import qualified Language.Haskell.TH as TH
 
-import qualified SDL
+import qualified SFML.Graphics as SFML
 
 data CSpriterModel
 data CEntityInstance
@@ -35,7 +35,7 @@ data CSpriteState = CSpriteState
 makeLenses ''CSpriteState
 
 data Sprite = Sprite
-    { _spriteTexture :: SDL.Texture
+    { _spriteTexture :: SFML.Sprite
     , _spritePivotX :: CDouble
     , _spritePivotY :: CDouble
     , _spriteName :: String

@@ -1,59 +1,35 @@
 {-# LANGUAGE TemplateHaskell, GADTs #-}
 module Input where
 
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Int (Int16)
 import Data.GADT.Compare.TH
 import Data.Word (Word8)
 import Foreign.C.Types (CDouble(..))
-import qualified SDL
-import qualified SDL.Raw.Types as SDL (JoystickID)
+import GHC.Float (float2Double)
 
-padButtonA, padButtonB, padButtonX, padButtonY :: Num a => a
-padButtonA = 0
-padButtonB = 1
-padButtonX = 2
-padButtonY = 3
-
-padTriggerLeft, padTriggerRight, padButtonBack, padButtonStart :: Num a => a
-padTriggerLeft = 4
-padTriggerRight = 5
-padButtonBack = 6
-padButtonStart = 7
-
-padButtonHome, padLeftStick, padRightStick :: Num a => a
-padButtonHome = 8
-padLeftStick = 9
-padRightStick = 10
-
-padXAxis :: Word8
-padXAxis = 0
+import qualified SFML.Window as SFML
 
 circleMass, circleRadius :: Num a => a
 circleMass = 10
 circleRadius = 20
 
-isPress :: SDL.KeyboardEventData -> Bool
-isPress event =
-    SDL.keyboardEventKeyMotion event == SDL.Pressed
+isPress :: SFML.SFEvent -> Bool
+isPress SFML.SFEvtKeyPressed {} = True
+isPress _ = False
 
-isRelease :: SDL.KeyboardEventData -> Bool
-isRelease event =
-    SDL.keyboardEventKeyMotion event == SDL.Released
+isRelease :: SFML.SFEvent -> Bool
+isRelease SFML.SFEvtKeyReleased {} = True
+isRelease _ = False
 
-eventKeycode :: SDL.KeyboardEventData -> SDL.Keycode
-eventKeycode = SDL.keysymKeycode . SDL.keyboardEventKeysym
+eventKeycode :: SFML.SFEvent -> SFML.KeyCode
+eventKeycode = SFML.code
 
-isKey :: SDL.Keycode -> SDL.KeyboardEventData -> Bool
+isKey :: SFML.KeyCode -> SFML.SFEvent -> Bool
 isKey keycode = (== keycode) . eventKeycode
 
-isKeyPressed :: SDL.Keycode -> SDL.Event -> Bool
-isKeyPressed key event =
-    case SDL.eventPayload event of
-        SDL.KeyboardEvent eventData ->
-            isPress eventData && isKey key eventData
-        _ ->
-            False
+isKeyPressed :: SFML.KeyCode -> SFML.SFEvent -> Bool
+isKeyPressed key event = isPress event && isKey key event
 
 data GamepadInput = GamepadInput
     { leftXAxis :: CDouble
@@ -68,30 +44,50 @@ initialInput = GamepadInput
     , yPressed = False
     }
 
-axisValue :: Int16 -> CDouble
-axisValue v = fromIntegral v / 32768
+type JoystickID = Int
 
-pollInput :: MonadIO m => Maybe SDL.Joystick -> m GamepadInput
+sfmlAxisIndex :: SFML.JoystickAxis -> Int
+sfmlAxisIndex SFML.JoystickX = 0
+sfmlAxisIndex SFML.JoystickY = 1
+
+-- TODO: check
+padButtonA, padButtonB, padButtonX, padButtonY :: Int
+padButtonA = 0
+padButtonB = 1
+padButtonX = 2
+padButtonY = 3
+
+padTriggerLeft, padTriggerRight, padButtonBack, padButtonStart :: Int
+padTriggerLeft = 4
+padTriggerRight = 5
+padButtonBack = 6
+padButtonStart = 7
+
+padButtonHome, padLeftStick, padRightStick :: Int
+padButtonHome = 8
+padLeftStick = 9
+padRightStick = 10
+
+pollInput :: MonadIO m => Maybe JoystickID -> m GamepadInput
 pollInput mGamepad =
     let deadzone v = if abs v < 0.15 then 0 else v
     in case mGamepad of
            Nothing -> return initialInput
            Just gamepad -> do
-               currentLeftXAxis <- SDL.axisPosition gamepad 0
-               currentLeftYAxis <- SDL.axisPosition gamepad 1
-               currentYPressed <- SDL.buttonPressed gamepad padButtonY
+               currentLeftXAxis <- liftIO $ SFML.getAxisPosition gamepad $ sfmlAxisIndex SFML.JoystickX
+               currentLeftYAxis <- liftIO $ SFML.getAxisPosition gamepad $ sfmlAxisIndex SFML.JoystickY
+               currentYPressed <- liftIO $ SFML.isJoystickButtonPressed gamepad padButtonY
                return GamepadInput
-                   { leftXAxis = deadzone $ axisValue currentLeftXAxis
-                   , leftYAxis = deadzone $ axisValue currentLeftYAxis
+                   { leftXAxis = CDouble $ float2Double $ deadzone currentLeftXAxis
+                   , leftYAxis = CDouble $ float2Double $ deadzone currentLeftYAxis
                    , yPressed = currentYPressed
                    }
 
-data SdlEventTag a where
-    ControllerDeviceEvent :: SdlEventTag SDL.ControllerDeviceEventData
-    JoyAxisEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyAxisEventData
-    JoyButtonEvent :: SDL.JoystickID -> SdlEventTag SDL.JoyButtonEventData
-    KeyEvent :: SDL.Keycode -> SdlEventTag SDL.KeyboardEventData
-    OtherEvent :: SdlEventTag SDL.Event
+data SfmlEventTag a where
+    JoyAxisEvent :: JoystickID -> SfmlEventTag SFML.SFEvent
+    JoyButtonEvent :: JoystickID -> SfmlEventTag SFML.SFEvent
+    KeyEvent :: SfmlEventTag SFML.SFEvent
+    OtherEvent :: SfmlEventTag SFML.SFEvent
 
-deriveGEq ''SdlEventTag
-deriveGCompare ''SdlEventTag
+deriveGEq ''SfmlEventTag
+deriveGCompare ''SfmlEventTag

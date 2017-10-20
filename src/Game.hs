@@ -3,7 +3,7 @@ module Game where
 
 import Control.Monad (replicateM_)
 import Control.Monad.Identity
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 
 import qualified Data.Aeson.Encode.Pretty as Aeson
 import Data.Bool (bool)
@@ -23,8 +23,8 @@ import Linear (V2(..), (^*))
 import Reflex
 import Reflex.Time
 
-import qualified SDL
-import qualified SDL.Image
+import qualified SFML.Graphics as SFML
+import qualified SFML.Window as SFML
 
 import qualified ChipmunkBindings as H
 import Characters
@@ -35,6 +35,7 @@ import MonadGame
 import qualified SpriterTypes as Spriter
 import qualified SpriterBindings as Spriter
 
+-- TODO: Maybe add health here (right now you respawn at the same level with full health though so it wouldn't matter)
 data PlayerState = PlayerState
     { playerStartsWithJetpack :: Bool
     , playerStatePosition :: Maybe H.Vector
@@ -98,27 +99,33 @@ createWall space (start, end) = do
     H.spaceAddShape space wallShape
     return (wallShape, wst)
 
+loadSprite :: MonadIO m => FilePath -> m SFML.Sprite
+loadSprite filepath = liftIO $ do
+    Right texture <- SFML.textureFromFile filepath Nothing
+    Right sprite <- SFML.createSprite
+    SFML.setTexture sprite texture True
+    return sprite
+
 initLevelNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
-    SDL.Renderer ->
-    EventSelector t SdlEventTag ->
+    EventSelector t SfmlEventTag ->
     Event t Int ->
-    Behavior t (SDL.Scancode -> Bool) ->
-    Maybe SDL.Joystick ->
+    Behavior t (SFML.KeyCode -> Bool) ->
+    Maybe JoystickID ->
     (LevelLoadedData, String, PlayerState) ->
     m (LogicOutput t)
-initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys mGamepad (levelLoaded, levelName, initialPlayerState) = do
-    let pressEvent kc = ffilter isPress $ select sdlEventFan (KeyEvent kc)
-        eF1Pressed = pressEvent SDL.KeycodeF1
-        eF2Pressed = pressEvent SDL.KeycodeF2
-        eF3Pressed = pressEvent SDL.KeycodeF3
-        eBackspacePressed = pressEvent SDL.KeycodeBackspace
-        eEscPressed = pressEvent SDL.KeycodeEscape
-        eEnterPressed = pressEvent SDL.KeycodeReturn
+initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (levelLoaded, levelName, initialPlayerState) = do
+    let pressEvent kc = ffilter (isKeyPressed kc) $ select sfmlEventFan KeyEvent
+        eF1Pressed = pressEvent SFML.KeyF1
+        eF2Pressed = pressEvent SFML.KeyF2
+        eF3Pressed = pressEvent SFML.KeyF3
+        eBackspacePressed = pressEvent SFML.KeyBack
+        eEscPressed = pressEvent SFML.KeyEscape
+        eEnterPressed = pressEvent SFML.KeyReturn
 
-        ePadButtonPress = select sdlEventFan (JoyButtonEvent 0)
+        ePadButtonPress = select sfmlEventFan (JoyButtonEvent 0)
         padFilterButtonPress b = ffilter
-            (\(SDL.JoyButtonEventData _ b' s) -> b == b' && s == 1) ePadButtonPress
+            (\(SFML.SFEvtJoystickButtonPressed _ b') -> b == b') ePadButtonPress
         ePadAPressed = padFilterButtonPress padButtonA
         ePadBPressed = padFilterButtonPress padButtonB
         ePadLTPressed = padFilterButtonPress padTriggerLeft
@@ -169,9 +176,9 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             <*> characterDbg
             <*> colCheckDbg
 
-    jetpackTex <- SDL.Image.loadTexture textureRenderer "res/jetpack.png"
+    jetpackTex <- loadSprite "res/jetpack.png"
     liftIO $ putStrLn "Loaded: res/jetpack.png"
-    particleTex <- SDL.Image.loadTexture textureRenderer "res/jetpack particle.png"
+    particleTex <- loadSprite "res/jetpack particle.png"
     liftIO $ putStrLn "Loaded: res/jetpack particle.png"
 
     let mJetpackPosition = snd <$> find (\(t, _) -> t == Jetpack) (pickupableObjects $ initialData levelLoaded)
@@ -214,7 +221,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
             playerNetwork
                 startTime
                 space
-                sdlEventFan
+                sfmlEventFan
                 (snd <$> ePlayerHurt)
                 gameTime
                 playerHasJetpack
@@ -275,7 +282,6 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
         eDeadCharactersRemoved <-
             performEvent (removeDeadCharacters <$> current aiCharacters <*> characterHealths <@ eACharacterDied)
 
-
         (aiCharacters :: Dynamic t [CharacterOutput t]) <-
             holdDyn initialCharacters eDeadCharactersRemoved
 
@@ -301,25 +307,26 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
 
     performEvent_ $ setAiDeltas <$> aiSprites <@> gate notEditing eSpriterDiff
 
-    let aPressed = ($ SDL.ScancodeA) <$> pressedKeys
-        dPressed = ($ SDL.ScancodeD) <$> pressedKeys
+    let aPressed = ($ SFML.KeyA) <$> pressedKeys
+        dPressed = ($ SFML.KeyD) <$> pressedKeys
         keyMovementX = controlVx 1 <$> aPressed <*> dPressed
-        wPressed = ($ SDL.ScancodeW) <$> pressedKeys
-        sPressed = ($ SDL.ScancodeS) <$> pressedKeys
+        wPressed = ($ SFML.KeyW) <$> pressedKeys
+        sPressed = ($ SFML.KeyS) <$> pressedKeys
         keyMovementY = controlVx 1 <$> wPressed <*> sPressed
-        ctrlPressed = do
-            modState <- SDL.getModState
-            return (SDL.keyModifierLeftCtrl modState || SDL.keyModifierRightCtrl modState)
+        ctrlPressed = liftIO $ do
+            lctrl <- SFML.isKeyPressed SFML.KeyLControl
+            rctrl <- SFML.isKeyPressed SFML.KeyRControl
+            return (lctrl || rctrl)
 
         xInput = limit $ fmap leftXAxis gamepadInput + keyMovementX
         yInput = limit $ fmap leftYAxis gamepadInput + keyMovementY
 
         editMoveInput = V2 <$> xInput <*> yInput
 
-        eSpacePressed = pressEvent SDL.KeycodeSpace
-        eDeletePressed = pressEvent SDL.KeycodeDelete
-        eSPressed = pressEvent SDL.KeycodeS
-        eUPressed = pressEvent SDL.KeycodeU
+        eSpacePressed = pressEvent SFML.KeySpace
+        eDeletePressed = pressEvent SFML.KeyDelete
+        eSPressed = pressEvent SFML.KeyS
+        eUPressed = pressEvent SFML.KeyU
 
         editing = not <$> notEditing
         editingCommand eKey ePad = gate editing $ leftmost [ () <$ eKey, () <$ ePad ]
@@ -490,9 +497,9 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
                 Just pos | not hasJet -> return [ StaticSprite jetpackTex (H.toV2 pos + float) 30 ]
                 _ -> return []
 
-    let eRPressed = pressEvent SDL.KeycodeR
-        eQPressed = pressEvent SDL.KeycodeQ
-        eLPressed = pressEvent SDL.KeycodeL
+    let eRPressed = pressEvent SFML.KeyR
+        eQPressed = pressEvent SFML.KeyQ
+        eLPressed = pressEvent SFML.KeyL
         promptForLevel = liftIO $ do
             putStr "Level to load: "
             name <- getLine
@@ -522,7 +529,7 @@ initLevelNetwork startTime textureRenderer sdlEventFan eStepPhysics pressedKeys 
     let levelMessages = messages $ initialData levelLoaded
 
     messageSprites <- liftIO $ forM levelMessages $ \(pos, filename) -> do
-        texture <- SDL.Image.loadTexture textureRenderer $ "res/" ++ filename
+        texture <- loadSprite $ "res/" ++ filename
         return (H.toV2 pos, texture)
 
     let renderMessage (pos, texture) = pure $ StaticSprite texture pos 0

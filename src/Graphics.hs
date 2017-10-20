@@ -4,7 +4,7 @@ import Data.Word (Word8)
 import Foreign.C.Types (CDouble)
 import Foreign.Ptr (Ptr)
 import Linear (V2(..), V4(..))
-import qualified SDL
+import qualified SFML.Graphics as SFML
 
 import qualified ChipmunkTypes as H
 import qualified SpriterTypes as Spriter
@@ -22,6 +22,6 @@ data Direction = DLeft | DRight deriving (Eq, Show)
 
 data Renderable
     = AnimatedSprite (Ptr Spriter.CEntityInstance) String (V2 CDouble) Direction
-    | StaticSprite SDL.Texture Position CDouble
+    | StaticSprite SFML.Sprite Position CDouble
     | Line Color Position Position
     | Shape (Ptr H.Shape) H.ShapeType

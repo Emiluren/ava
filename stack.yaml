@@ -10,4 +10,5 @@ extra-deps:
 - dependent-sum-template-0.0.0.6
 - prim-uniq-0.1.0.1
 - ref-tf-0.4.0.1
+- SFML-2.3.2.4
 resolver: lts-9.4
