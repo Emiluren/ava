@@ -31,6 +31,10 @@ isKey keycode = (== keycode) . eventKeycode
 isKeyPressed :: SFML.KeyCode -> SFML.SFEvent -> Bool
 isKeyPressed key event = isPress event && isKey key event
 
+wasButtonPressed :: Int -> SFML.SFEvent -> Bool
+wasButtonPressed button (SFML.SFEvtJoystickButtonPressed _ b) = button == b
+wasButtonPressed _ _ = False
+
 data GamepadInput = GamepadInput
     { leftXAxis :: CDouble
     , leftYAxis :: CDouble
@@ -71,11 +75,12 @@ padRightStick = 10
 pollInput :: MonadIO m => Maybe JoystickID -> m GamepadInput
 pollInput mGamepad =
     let deadzone v = if abs v < 0.15 then 0 else v
+        getAxis g a = fmap (/100) $ liftIO $ SFML.getAxisPosition g $ sfmlAxisIndex a
     in case mGamepad of
            Nothing -> return initialInput
            Just gamepad -> do
-               currentLeftXAxis <- liftIO $ SFML.getAxisPosition gamepad $ sfmlAxisIndex SFML.JoystickX
-               currentLeftYAxis <- liftIO $ SFML.getAxisPosition gamepad $ sfmlAxisIndex SFML.JoystickY
+               currentLeftXAxis <- getAxis gamepad SFML.JoystickX
+               currentLeftYAxis <- getAxis gamepad SFML.JoystickY
                currentYPressed <- liftIO $ SFML.isJoystickButtonPressed gamepad padButtonY
                return GamepadInput
                    { leftXAxis = CDouble $ float2Double $ deadzone currentLeftXAxis

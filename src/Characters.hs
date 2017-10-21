@@ -201,7 +201,6 @@ attackEffect space pos dir imp onHit = do
         return Nothing
 
 aiCharacterNetwork :: forall t m. MonadGame t m =>
-    Time.UTCTime ->
     Ptr H.Space ->
     Ptr H.Body ->
     Event t TickInfo ->
@@ -213,7 +212,7 @@ aiCharacterNetwork :: forall t m. MonadGame t m =>
     (Ptr H.Shape, Ptr H.Shape) ->
     Ptr Spriter.CEntityInstance ->
     m (CharacterOutput t)
-aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics eTakeDamage gameTime playerPosition debugSettings (feetShape, bodyShape) sprite = do
+aiCharacterNetwork space playerBody eAiTick eSamplePhysics eWasHit gameTime playerPosition debugSettings (feetShape, bodyShape) sprite = do
     let speedForAnim "Run" = playerSpeed / 3
         speedForAnim _ = playerSpeed / 6
 
@@ -402,7 +401,7 @@ aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics eTakeDamage
             debugRenderCharacter debugSettings renderFeetAndBody renderSideChecks
 
     health <- foldDyn (+) 100 $ negate <$>
-        fmapMaybe (\(b, d) -> if b == body then Just d else Nothing) eTakeDamage
+        fmapMaybe (\(b, d) -> if b == body then Just d else Nothing) eWasHit
 
     return CharacterOutput
         { characterSurfaceVelocity = mummySurfaceVelocity
@@ -457,16 +456,15 @@ playerNetwork :: forall t m. MonadGame t m =>
     Ptr Spriter.CEntityInstance ->
     (SFML.Sprite, SFML.Sprite) ->
     m (CharacterOutput t)
-playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEditing pressedKeys (pos, velocity) onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite (jetpackTex, particleTex) = do
-    let pressEvent kc = gate notEditing $ ffilter (isKeyPressed kc) $ select sdlEventFan KeyEvent
+playerNetwork startTime space sfmlEventFan eWasHit gameTime hasJetpack notEditing pressedKeys (pos, velocity) onGround aiShapes debugSettings mGamepad body (feetShape, bodyShape) sprite (jetpackTex, particleTex) = do
+    let pressEvent kc = gate notEditing $ ffilter (isKeyPressed kc) $ select sfmlEventFan KeyEvent
         eAPressed = pressEvent SFML.KeyA
         eDPressed = pressEvent SFML.KeyD
         eWPressed = pressEvent SFML.KeyW
         eKPressed = pressEvent SFML.KeyK
-        ePadButtonPress = gate notEditing $ select sdlEventFan (JoyButtonEvent 0)
-        ePadAxisMove = gate notEditing $ select sdlEventFan (JoyAxisEvent 0)
-        padFilterButtonPress b = ffilter
-            (\(SFML.SFEvtJoystickButtonPressed b' _) -> b == b') ePadButtonPress
+        ePadAxisMove = gate notEditing $ select sfmlEventFan (JoyAxisEvent 0)
+        padFilterButtonPress b = ffilter (wasButtonPressed b) $ gate notEditing $
+            select sfmlEventFan (JoyButtonEvent 0)
         ePadAPressed = padFilterButtonPress padButtonA
         ePadXPressed = padFilterButtonPress padButtonX
         ePadNotCenter = ffilter
@@ -479,11 +477,24 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
 
         ePlayerWantsToJump = mconcat [() <$ eWPressed, () <$ ePadAPressed]
         ePlayerWantsToKick = mconcat [() <$ eKPressed, () <$ ePadXPressed]
-        ePlayerKick = ePlayerWantsToKick -- TODO: Add check for current player state
 
-        jumpEvent = (-1000) <$ gate onGround ePlayerWantsToJump
+    rec
+        let ePlayerKick = gate (not <$> current playerIsKicking) ePlayerWantsToKick
+            eJump = (-1000) <$ gate playerCanJump ePlayerWantsToJump
+            kickDuration = 0.6
 
-        jump imp = liftIO $ H.applyImpulse body (H.Vector 0 imp) H.zero
+        latestPlayerKick <- holdDyn Nothing $ Just <$> current gameTime <@ ePlayerKick
+
+        let playerIsKicking = do
+                currentTime <- gameTime
+                lastKickTime <- latestPlayerKick
+                return $ case lastKickTime of
+                    Just t -> currentTime - t < kickDuration
+                    Nothing -> False
+
+            playerCanJump = (&&) <$> onGround <*> (not <$> current playerIsKicking)
+
+    let jump imp = liftIO $ H.applyImpulse body (H.Vector 0 imp) H.zero
 
         playerKickEffect :: H.Vector -> Direction -> [(Ptr H.Shape, Ptr H.Shape)] -> Performable m (Maybe (Ptr H.Body))
         playerKickEffect playerP playerD currentAiShapes = do
@@ -507,25 +518,20 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
         playerMovement = limit $ (+) <$> playerKeyMovement <*> playerAxisMovement
         playerAirForce = (\d -> H.Vector (d * 1000) 0) <$> playerMovement
         playerAcc = H.Vector <$> fmap (* playerSpeed) playerMovement <*> pure 0
-        playerSurfaceVelocity = bool
-            <$> pure (H.Vector 0 0) <*> playerAcc <*> onGround
+
+        dontUseTheForce = (&&) <$> onGround <*> fmap not (current playerIsKicking)
+        playerSurfaceVelocity = do
+            notUsingForce <- dontUseTheForce
+            if notUsingForce
+                then playerAcc
+                else pure H.zero
+
         playerMoving = (\(H.Vector vx _) -> abs vx > 0) <$> playerSurfaceVelocity
-
-        kickDuration = 0.6
         kickDelay = 0.4
-        pickAnimation moving onGroundNow lastKickTime currentTime =
-            let runOrIdle
-                    | not onGroundNow = "Falling"
-                    | moving = "Run"
-                    | otherwise = "Idle"
-            in case lastKickTime of
-                Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
-                Nothing -> runOrIdle
 
-    latestPlayerKick <- hold Nothing $ Just <$> current gameTime <@ ePlayerKick
     eDelayedPlayerKick <- delayInDynTime gameTime kickDelay ePlayerKick
 
-    playerDir <- hold DRight $ gate notEditing $ leftmost
+    playerDir <- hold DRight $ gate (not <$> current playerIsKicking) $ gate notEditing $ leftmost
         [ DLeft <$ eAPressed
         , DRight <$ eDPressed
         , ePadChangeDir
@@ -534,7 +540,7 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
     performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ ePlayerKick
     eHitEnemy <- performEvent $ playerKickEffect <$> pos <*> playerDir <*> aiShapes <@ eDelayedPlayerKick
 
-    performEvent_ $ jump <$> jumpEvent
+    performEvent_ $ jump <$> eJump
 
     stdGen <- liftIO newStdGen
 
@@ -569,15 +575,50 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
         particles <- hold [] $ flip (:) <$> aliveParticles <@> eNewParticle
         let aliveParticles = (filter . particleAlive) <$> current gameTime <*> particles
 
-    let playerAnimation =
-            pickAnimation <$> playerMoving <*> onGround <*> latestPlayerKick <*> current gameTime
-        horizontalForce = bool <$> playerAirForce <*> pure H.zero <*> onGround
+    let invincibleDuration = 2
+        blinkInterval = 0.1
+
+    eTimeDiffs <- mapAccum_ (\t t' -> (t', t' - t)) 0 $ updated gameTime
+    eToggleBlink <- mapAccumMaybe_
+        (\acc dt -> let acc' = acc + dt in
+                if acc' >= blinkInterval then
+                    (Just $ acc' - blinkInterval, Just ())
+                else
+                    (Just acc', Nothing)) 0 eTimeDiffs
+    blinkShowing <- toggle True eToggleBlink
+
+    rec
+        latestHurtTime <- holdDyn Nothing $ Just <$> current gameTime <@ eWasHit
+
+        let isInvincible = do
+                mLatestDamage <- latestHurtTime
+                t <- gameTime
+                return $ case mLatestDamage of
+                    Just latestDamage -> t - latestDamage < invincibleDuration
+                    Nothing -> False
+
+            eTakeDamage = gate (not <$> current isInvincible) eWasHit
+
+    health <- foldDyn (+) 100 $ negate <$> eTakeDamage
+
+    let pickAnimation moving onGroundNow isKicking
+            | isKicking = "Kick"
+            | not onGroundNow = "Falling"
+            | moving = "Run"
+            | otherwise = "Idle"
+
+        playerAnimation = pickAnimation <$> playerMoving <*> onGround <*> current playerIsKicking
+        horizontalForce = bool <$> playerAirForce <*> pure H.zero <*> dontUseTheForce
         verticalForce = bool H.zero (H.Vector 0 $ -6000) <$> jetpackOn
         playerForce = horizontalForce + verticalForce
 
-        renderCharacter = sequenceA
-            [ AnimatedSprite sprite <$> playerAnimation <*> fmap H.toV2 pos <*> playerDir
-            ]
+        renderCharacter = do
+            anim <- playerAnimation
+            p <- fmap H.toV2 pos
+            d <- playerDir
+            blink <- current blinkShowing
+            invincible <- current isInvincible
+            return [ AnimatedSprite sprite anim p d | not invincible || blink ]
 
         renderColDebug = do
             playerP <- pos
@@ -614,10 +655,6 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
             currentTime <- current gameTime
             forM (particleState currentTime <$> pars) $ \(p, angle) ->
                 return $ StaticSprite particleTex p angle 1
-
-    health <- foldDyn (+) 100 $ negate <$> eTakeDamage
-
-    latestHurtTime <- hold Nothing $ Just <$> current gameTime <@ eTakeDamage
 
     return CharacterOutput
         { characterSurfaceVelocity = playerSurfaceVelocity

@@ -124,9 +124,8 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         eEscPressed = pressEvent SFML.KeyEscape
         eEnterPressed = pressEvent SFML.KeyReturn
 
-        ePadButtonPress = select sfmlEventFan (JoyButtonEvent 0)
-        padFilterButtonPress b = ffilter
-            (\(SFML.SFEvtJoystickButtonPressed _ b') -> b == b') ePadButtonPress
+        padFilterButtonPress b = ffilter (wasButtonPressed b) $
+            select sfmlEventFan (JoyButtonEvent 0)
         ePadAPressed = padFilterButtonPress padButtonA
         ePadBPressed = padFilterButtonPress padButtonB
         ePadLTPressed = padFilterButtonPress padTriggerLeft
@@ -242,7 +241,6 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             ePlayerAttack = characterAttack player
             initAiCharacter =
                      aiCharacterNetwork
-                         startTime
                          space
                          playerBody
                          aiTick

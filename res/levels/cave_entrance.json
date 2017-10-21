@@ -49,7 +49,7 @@
     ],
     "physicalObjects": [],
     "playerStartPosition": {
-        "cpVecY": 100,
+        "cpVecY": 120,
         "cpVecX": 240
     },
     "pickupableObjects": [],
