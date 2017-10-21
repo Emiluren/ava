@@ -255,6 +255,9 @@ main :: IO ()
 main = do
     hSetBuffering stdout NoBuffering
 
+    Right shader <- SFML.shaderFromFile (Just "res/effects.vsh") (Just "res/effects.fsh")
+    SFML.setCurrentTextureParameter shader "texture"
+
     let videoMode = SFML.VideoMode
             { SFML.windowWidth = 800
             , SFML.windowHeight = 600
@@ -350,7 +353,8 @@ main = do
             SFML.setPosition renderTextureSprite renderPos
             SFML.setScale renderTextureSprite (SFML.Vec2f scale scale)
 
-            SFML.drawSprite window renderTextureSprite Nothing
+            SFML.drawSprite window renderTextureSprite $
+                Just $ SFML.renderStates { SFML.shader = shader}
             SFML.display window
             SFML.destroy renderTextureSprite
 
