@@ -11,6 +11,8 @@ import qualified Data.ByteString.Lazy.Char8 as BS
 import Data.Foldable (asum)
 import Data.List (find)
 import Data.Maybe (catMaybes)
+import Data.Map ((!))
+import qualified Data.Map as Map
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
 import qualified Data.Time.Clock as Time
@@ -25,6 +27,8 @@ import Reflex.Time
 
 import qualified SFML.Graphics as SFML
 import qualified SFML.Window as SFML
+
+import qualified System.Console.Haskeline as HL
 
 import qualified ChipmunkBindings as H
 import Characters
@@ -180,6 +184,18 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     liftIO $ putStrLn "Loaded: res/jetpack.png"
     particleTex <- loadSprite "res/jetpack particle.png"
     liftIO $ putStrLn "Loaded: res/jetpack particle.png"
+
+    initialImages <- liftIO $ do
+        let images = levelBackgroundImages $ initialData levelLoaded
+            filenames = (\(x, _, _) -> x) <$> images
+        sprites <- forM filenames $ \file ->
+            loadSprite $ "res/background_images/" ++ file
+        return $ Map.fromList $ zip filenames sprites
+
+    let eLoadedImage = never
+        updateImages newImgPath db = db
+
+    loadedImages <- foldDyn updateImages initialImages eLoadedImage
 
     let mJetpackPosition = snd <$> find (\(t, _) -> t == Jetpack) (pickupableObjects $ initialData levelLoaded)
 
@@ -442,11 +458,20 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             , pushAlways (\p -> cameraBehavior (pure p) False) eSnapPos
             ]
 
-    let saveLevel levelData = liftIO $ do
-            putStr "File name: ./res/levels/"
-            filename <- ("res/levels/" ++) <$> getLine
-            BS.writeFile filename $ Aeson.encodePretty levelData
-            putStrLn $ filename ++ " was saved"
+    -- rec
+    --     let eImageUpdates = never
+
+    --     backgroundImages <- current <$> foldDyn updateBackgroundImages
+    --         (levelBackgroundImages $ initialData levelLoaded) eImageUpdates
+
+    let saveLevel levelData = liftIO $ HL.runInputT HL.defaultSettings $ do
+            liftIO $ putStr "File name: ./res/levels/"
+            mFilename <- HL.getInputLine "> "
+            case mFilename of
+                Nothing -> return ()
+                Just filename -> liftIO $ do
+                    BS.writeFile ("res/levels/" ++ filename) $ Aeson.encodePretty levelData
+                    putStrLn $ filename ++ " was saved"
 
         ePrintCamPos = leftmost [ () <$ eEnterPressed, () <$ ePadLeftStickPressed ]
 
@@ -462,6 +487,12 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             if dbgRender
                 then return (uncurry Shape <$> currentMiscRefs)
                 else return []
+
+        renderBackground = do
+            imageDb <- current loadedImages
+            images <- levelBackgroundImages <$> current currentLevelData
+            return $ ffor images $ \(imgfile, pos, angle) ->
+                StaticSprite (imageDb ! imgfile) (H.toV2 pos) angle 1
 
         renderCrosshair = do
             p <- cameraPosition
@@ -499,12 +530,19 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     let eRPressed = pressEvent SFML.KeyR
         eQPressed = pressEvent SFML.KeyQ
         eLPressed = pressEvent SFML.KeyL
-        promptForLevel = liftIO $ do
-            putStr "Level to load: "
-            name <- getLine
-            putStr "Have jetpack? "
-            keep <- getLine
-            return $ Loadlevel name $ PlayerState (keep == "y") Nothing
+        promptForLevel = liftIO $ HL.runInputT HL.defaultSettings $ do
+            liftIO $ putStr "Level to load: "
+            mName <- HL.getInputLine "> "
+            case mName of
+                Nothing -> return Nothing
+                Just name -> do
+                    liftIO $ putStr "Have jetpack? "
+                    mJet <- HL.getInputLine "> "
+                    case mJet of
+                        Nothing -> return Nothing
+                        Just jet -> return $ Just $
+                            Loadlevel name $ PlayerState (jet == "y") Nothing
+
         currentLevelExits = levelexits <$> current currentLevelData
         playerInside jp (H.Vector px py) (H.Vector ex ey, H.Vector ew eh, name, initPos)
             | px < ex = Nothing
@@ -523,7 +561,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     eCtrlLPressed <- ffilter id <$> performEvent (ctrlPressed <$ eLPressed)
     eCheckForLevelExit <- tickLossy (1/15) startTime
 
-    eLoadLevel <- performEvent $ promptForLevel <$ eCtrlLPressed
+    eLoadLevel <- fmap (fmapMaybe id) $ performEvent $ promptForLevel <$ eCtrlLPressed
 
     let levelMessages = messages $ initialData levelLoaded
 
@@ -564,7 +602,8 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     return LogicOutput
         { cameraCenterPosition = cameraPosition
         , renderCommands =
-                renderJetpack
+                renderBackground
+                <> renderJetpack
                 <> characterRendering player
                 <> aiRendering
                 <> renderShapes

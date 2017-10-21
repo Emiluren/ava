@@ -1,4 +1,14 @@
 {
+    "levelBackgroundImages" : [
+        [
+            "blob.png",
+            {
+                "cpVecY": 0,
+                "cpVecX": 200
+            },
+            0
+        ]
+    ],
     "levelexits" : [
         [
             {

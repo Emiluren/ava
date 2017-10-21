@@ -30,6 +30,7 @@ instance FromJSON PickupObjectType
 
 type Position = H.Vector
 type Size = H.Vector
+type Angle = H.CpFloat
 
 data LevelData = LevelData
     { playerStartPosition :: Position
@@ -39,6 +40,7 @@ data LevelData = LevelData
     , pickupableObjects :: [(PickupObjectType, Position)]
     , levelexits :: [(Position, Size, String, Position)]
     , messages :: [(Position, String)]
+    , levelBackgroundImages :: [(FilePath, Position, Angle)]
     } deriving (Generic, Show, Eq)
 
 instance ToJSON LevelData where
@@ -72,4 +74,5 @@ testLevel =
        , pickupableObjects = []
        , levelexits = []
        , messages = []
+       , levelBackgroundImages = []
        }

@@ -50,6 +50,7 @@ executable ava
                      , inline-c-cpp
                      , lens
                      , linear
+                     , haskeline
                      , mtl
                      , primitive
                      , random
