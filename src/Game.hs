@@ -45,6 +45,7 @@ data QuitData = Exit | Loadlevel String PlayerState deriving (Eq, Show)
 data LogicOutput t = LogicOutput
     { cameraCenterPosition :: Behavior t (V2 CDouble)
     , renderCommands :: Behavior t [Renderable]
+    , logicPlayerHealth :: Behavior t Double
     , quit :: Event t QuitData
     }
 
@@ -494,7 +495,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             gt <- current gameTime
             let float = V2 0 $ 5 * sin (2 * realToFrac gt)
             case mJetpackPosition of
-                Just pos | not hasJet -> return [ StaticSprite jetpackTex (H.toV2 pos + float) 30 ]
+                Just pos | not hasJet -> return [ StaticSprite jetpackTex (H.toV2 pos + float) 30 1 ]
                 _ -> return []
 
     let eRPressed = pressEvent SFML.KeyR
@@ -530,11 +531,37 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
 
     messageSprites <- liftIO $ forM levelMessages $ \(pos, filename) -> do
         texture <- loadSprite $ "res/" ++ filename
-        return (H.toV2 pos, texture)
+        return (pos, texture)
 
-    let renderMessage (pos, texture) = pure $ StaticSprite texture pos 0
-        renderMessages = sequenceA $ renderMessage <$> messageSprites
+    let approach desired speed startValue = do
+            let step = speed / 60
+                updateVal target old =
+                    let dif = target - old
+                    in if abs dif < step then
+                        target
+                    else
+                        old + signum dif * step
+            val <- foldDyn updateVal startValue $ desired <@ updated gameTime
+            return $ current val
+
+        messagesWithAlphas =
+            forM messageSprites $ \(pos@(H.Vector _ y), sprite) -> do
+                let alpha = do
+                        ppos@(H.Vector _ py) <- playerPosition
+                        if H.len (pos - ppos) < 100 && py < y then 1 else 0
+                a <- approach alpha 0.3 0
+                return (H.toV2 pos, sprite, a)
+
+    msgs <- messagesWithAlphas
+
+    let renderMessage (pos, texture, alpha) = StaticSprite texture pos 0 <$> alpha
+        renderMessages =
+            traverse renderMessage msgs
         reloadLevel = Loadlevel levelName initialPlayerState
+
+        playerHealth = (\h -> fromIntegral h / 100) <$> current (characterHealth player)
+
+    fadedHealth <- approach playerHealth 0.1 1
 
     return LogicOutput
         { cameraCenterPosition = cameraPosition
@@ -545,6 +572,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
                 <> renderShapes
                 <> renderInterface
                 <> renderMessages
+        , logicPlayerHealth = fadedHealth
         , quit = leftmost
             [ Exit <$ eQPressed
             , reloadLevel <$ eRPressed

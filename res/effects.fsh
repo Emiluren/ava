@@ -1,4 +1,5 @@
 uniform sampler2D texture;
+uniform float health;
 
 vec3 rgb2hsv(vec3 c)
 {
@@ -25,6 +26,9 @@ void main()
 
     vec3 hsv = rgb2hsv(pixel.rgb);
 
+    float sat_scaling = max(0.0, (health - 0.3) / 0.7);
+    float val_scaling = min(1.0, (health + 0.5) / 0.8);
+
     // multiply it by the color
-    gl_FragColor = gl_Color * vec4(hsv2rgb(hsv * vec3(1, 0, 0.6)), pixel.a);
+    gl_FragColor = gl_Color * vec4(hsv2rgb(hsv * vec3(1, sat_scaling, val_scaling)), pixel.a);
 }

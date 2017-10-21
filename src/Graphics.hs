@@ -11,6 +11,8 @@ import qualified SpriterTypes as Spriter
 
 type Color = V4 Word8
 type Position = V2 CDouble
+type Angle = CDouble
+type Alpha = CDouble
 
 white :: Color
 white = V4 255 255 255 255
@@ -22,6 +24,6 @@ data Direction = DLeft | DRight deriving (Eq, Show)
 
 data Renderable
     = AnimatedSprite (Ptr Spriter.CEntityInstance) String (V2 CDouble) Direction
-    | StaticSprite SFML.Sprite Position CDouble
+    | StaticSprite SFML.Sprite Position Angle Alpha
     | Line Color Position Position
     | Shape (Ptr H.Shape) H.ShapeType

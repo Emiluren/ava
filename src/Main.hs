@@ -211,6 +211,7 @@ mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mGam
     let initialOutput = LogicOutput
             { cameraCenterPosition = pure $ V2 0 0
             , renderCommands = pure []
+            , logicPlayerHealth = 1
             , quit = never
             }
 
@@ -240,6 +241,7 @@ mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mGam
     return LogicOutput
         { cameraCenterPosition = join $ current $ cameraCenterPosition <$> dGameMode
         , renderCommands = join $ current $ renderCommands <$> dGameMode
+        , logicPlayerHealth = join $ current $ logicPlayerHealth <$> dGameMode
         , quit = ffilter (== Exit) eGameModeQuit
         }
 
@@ -296,8 +298,8 @@ main = do
     Spriter.setErrorFunction
 
     let
-        render :: MonadIO m => V2 CDouble -> [Renderable] -> m ()
-        render camOffset renderables = liftIO $ do
+        render :: MonadIO m => V2 CDouble -> [Renderable] -> Float -> m ()
+        render camOffset renderables playerHealth = liftIO $ do
             --SDL.rendererRenderTarget softwareRenderer $= Just renderTexture
             SFML.clear renderTexture (SFML.Color 55 60 55 255)
             True <- SFML.setActive renderTexture True
@@ -314,7 +316,7 @@ main = do
                         -- Sprite won't be in the right place unless it's updated
                         Spriter.setEntityInstanceTimeElapsed entityInstance 0
                         Spriter.renderEntityInstance entityInstance
-                    StaticSprite sprite pos (CDouble angle) -> do
+                    StaticSprite sprite pos (CDouble angle) alpha -> do
                         Just texture <- SFML.getTexture sprite
                         SFML.Vec2u w h <- SFML.textureSize texture
                         let px = w `div` 2
@@ -323,6 +325,7 @@ main = do
                         SFML.setOrigin sprite $ SFML.Vec2f (fromIntegral px) (fromIntegral py)
                         SFML.setPosition sprite (SFML.Vec2f (double2Float x) (double2Float y))
                         SFML.setRotation sprite (double2Float angle)
+                        SFML.setColor sprite (SFML.Color 255 255 255 $ floor $ alpha * 255)
                         SFML.drawSprite renderTexture sprite Nothing
                     Line color p1 p2 -> do
                         let (V2 x1 y1) = fmap (double2Float . fromCDouble) $ p1 - camOffset
@@ -353,6 +356,7 @@ main = do
             SFML.setPosition renderTextureSprite renderPos
             SFML.setScale renderTextureSprite (SFML.Vec2f scale scale)
 
+            SFML.setFloatParameter shader "health" playerHealth
             SFML.drawSprite window renderTextureSprite $
                 Just $ SFML.renderStates { SFML.shader = shader}
             SFML.display window
@@ -449,10 +453,11 @@ main = do
 
                 renderables <- hSample $ renderCommands logicOutput
                 cameraCenterPos <- hSample $ cameraCenterPosition logicOutput
+                playerHealth <- hSample $ logicPlayerHealth logicOutput
 
                 let camOffset = V2 (renderTextureSize / 2) (renderTextureSize / 2)
 
-                render (cameraCenterPos - camOffset) renderables
+                render (cameraCenterPos - camOffset) renderables $ double2Float playerHealth
 
                 delayedEventTriggeredExit <- liftIO $ readIORef quitRef
                 let shouldQuit = delayedEventTriggeredExit

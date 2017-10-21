@@ -239,8 +239,6 @@ aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics eTakeDamage
                else
                    (\b -> if b == playerBody then Just () else Nothing) <$> get (H.shapeBody shape)
 
-        clock = clockLossy (1/60) startTime
-
         mummyPunchEffect :: H.Vector -> Direction -> Performable m (Maybe (Ptr H.Body))
         mummyPunchEffect position dir =
             liftIO $ attackEffect space position dir 500
@@ -249,7 +247,6 @@ aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics eTakeDamage
                          putStrLn "punched player" >> return (Just playerBody)
                      else
                          return Nothing)
-
 
     body <- get $ H.shapeBody feetShape
 
@@ -333,26 +330,27 @@ aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics eTakeDamage
 
         eHitChecks <- performEvent $
             checkForHitPossibility <$> mummySeesPlayer <*> mummyDisplayDir <@> colResults
-        let eWantsToHitPlayer = fmapMaybe id eHitChecks
 
-        performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ eWantsToHitPlayer
+        rec
+            let eWantsToHitPlayer = fmapMaybe id eHitChecks
+                eStartPunch = gate (not <$> isPunching) eWantsToHitPlayer
 
-        tickInfo <- current <$> clock
-        let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
-            punchDelay = 0.25
-            punchDuration = 0.6
+            performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ eStartPunch
 
-        latestMummyPunch <- hold Nothing $ Just <$> timeSinceStart <@ eWantsToHitPlayer
-        eDelayedMummyPunch <- delayInDynTime gameTime punchDelay eWantsToHitPlayer
+            let punchDelay = 0.25
+                punchDuration = 0.6
 
-        eHitPlayer <- performEvent $ mummyPunchEffect <$> pos <*> mummyDisplayDir <@ eDelayedMummyPunch
+            latestMummyPunch <- hold Nothing $ Just <$> current gameTime <@ eStartPunch
+            eDelayedMummyPunch <- delayInDynTime gameTime punchDelay eStartPunch
 
-        let isPunching = do
-                t <- timeSinceStart
-                mLatestPunchStart <- latestMummyPunch
-                return $ case mLatestPunchStart of
-                    Nothing -> False
-                    Just latestPunchStart -> t < latestPunchStart + punchDuration
+            eHitPlayer <- performEvent $ mummyPunchEffect <$> pos <*> mummyDisplayDir <@ eDelayedMummyPunch
+
+            let isPunching = do
+                    t <- current gameTime
+                    mLatestPunchStart <- latestMummyPunch
+                    return $ case mLatestPunchStart of
+                        Nothing -> False
+                        Just latestPunchStart -> t < latestPunchStart + punchDuration
 
         mummyWalkingState <- foldDynM runAiLogic (AiStay, "Idle") colResults
         let mummyAiState = do
@@ -412,7 +410,7 @@ aiCharacterNetwork startTime space playerBody eAiTick eSamplePhysics eTakeDamage
         , characterDirection = mummyDisplayDir
         , characterAnimation = mummyAnimation
         , characterRendering = aiAnimation <> renderColDebug
-        , characterAttack = (playerBody, 40) <$ fmapMaybe id eHitPlayer
+        , characterAttack = (playerBody, 10) <$ fmapMaybe id eHitPlayer
         , characterHealth = health
         , characterRefsAndSprite = ((feetShape, bodyShape), sprite)
         }
@@ -524,12 +522,7 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
                 Just t -> if currentTime - t < kickDuration then "Kick" else runOrIdle
                 Nothing -> runOrIdle
 
-        clock = clockLossy (1/60) startTime
-
-    tickInfo <- current <$> clock
-    let timeSinceStart = flip Time.diffUTCTime startTime . _tickInfo_lastUTC <$> tickInfo
-
-    latestPlayerKick <- hold Nothing $ Just <$> timeSinceStart <@ ePlayerKick
+    latestPlayerKick <- hold Nothing $ Just <$> current gameTime <@ ePlayerKick
     eDelayedPlayerKick <- delayInDynTime gameTime kickDelay ePlayerKick
 
     playerDir <- hold DRight $ gate notEditing $ leftmost
@@ -576,9 +569,8 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
         particles <- hold [] $ flip (:) <$> aliveParticles <@> eNewParticle
         let aliveParticles = (filter . particleAlive) <$> current gameTime <*> particles
 
-
     let playerAnimation =
-            pickAnimation <$> playerMoving <*> onGround <*> latestPlayerKick <*> timeSinceStart
+            pickAnimation <$> playerMoving <*> onGround <*> latestPlayerKick <*> current gameTime
         horizontalForce = bool <$> playerAirForce <*> pure H.zero <*> onGround
         verticalForce = bool H.zero (H.Vector 0 $ -6000) <$> jetpackOn
         playerForce = horizontalForce + verticalForce
@@ -615,15 +607,17 @@ playerNetwork startTime space sdlEventFan eTakeDamage gameTime hasJetpack notEdi
                             if dir == DRight then 10 else -10
                         else
                             0
-                return [ StaticSprite jetpackTex jetpos angle ]
+                return [ StaticSprite jetpackTex jetpos angle 1 ]
 
         renderParticles = do
             pars <- aliveParticles
             currentTime <- current gameTime
             forM (particleState currentTime <$> pars) $ \(p, angle) ->
-                return $ StaticSprite particleTex p angle
+                return $ StaticSprite particleTex p angle 1
 
     health <- foldDyn (+) 100 $ negate <$> eTakeDamage
+
+    latestHurtTime <- hold Nothing $ Just <$> current gameTime <@ eTakeDamage
 
     return CharacterOutput
         { characterSurfaceVelocity = playerSurfaceVelocity
