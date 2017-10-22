@@ -424,7 +424,7 @@ aiCharacterNetwork space playerBody eAiTick eSamplePhysics eWasHit gameTime play
         , characterDirection = mummyDisplayDir
         , characterAnimation = mummyAnimation
         , characterRendering = aiAnimation <> renderColDebug
-        , characterAttack = (playerBody, 10) <$ fmapMaybe id eHitPlayer
+        , characterAttack = (playerBody, 20) <$ fmapMaybe id eHitPlayer
         , characterHealth = health
         , characterRefsAndSprite = ((feetShape, bodyShape), sprite)
         }
@@ -684,6 +684,6 @@ playerNetwork startTime space sfmlEventFan eWasHit gameTime hasJetpack notEditin
                 <> renderCharacter
                 <> renderColDebug
         , characterHealth = health
-        , characterAttack = (\b -> (b, 30)) <$> fmapMaybe id eHitEnemy
+        , characterAttack = (\b -> (b, 40)) <$> fmapMaybe id eHitEnemy
         , characterRefsAndSprite = ((feetShape, bodyShape), sprite)
         }

@@ -688,6 +688,24 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
 
     fadedHealth <- approach playerHealth 0.1 1
 
+    let endPoint = H.Vector 1940 (-980)
+        calcDist _ = do
+            camPos <- sample cameraPosition
+            let dist = H.len (H.fromV2 camPos - endPoint)
+            return (camPos, dist)
+        checkForCreditsFade (_camPos, dist) =
+            if dist < 200 then Just () else Nothing
+
+    Just creditsSprite <- loadSprite "res/credits.png"
+    let eFadeInCredits = fmapMaybe checkForCreditsFade $ pushAlways calcDist $ updated gameTime
+    creditsAlphaGoal <- holdDyn 0 $ 1 <$ eFadeInCredits
+    creditsAlpha <- approach (current creditsAlphaGoal) 0.1 0
+
+    let renderCredits = do
+            alpha <- creditsAlpha
+            pos <- cameraPosition
+            return [ StaticSprite creditsSprite pos 0 alpha ]
+
     return LogicOutput
         { cameraCenterPosition = cameraPosition
         , renderCommands =
@@ -699,6 +717,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
                 <> renderShapes
                 <> renderInterface
                 <> renderMessages
+                <> renderCredits
         , logicPlayerHealth = fadedHealth
         , quit = leftmost
             [ Exit <$ eQPressed
