@@ -217,7 +217,7 @@ mainReflex imgloader renderf startTime sdlEventFan eStepPhysics pressedKeys mGam
 
     rec
         eLevelLoaded <- performEvent $ leftmost
-            [ loadTestLevel "jetpack_corridor.json" (PlayerState False Nothing) <$ eInit
+            [ loadTestLevel "start.json" (PlayerState False Nothing) <$ eInit
             , uncurry loadTestLevel <$> eSwitchGameMode
             ]
 
