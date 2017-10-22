@@ -10,7 +10,7 @@ import Data.Bool (bool)
 import qualified Data.ByteString.Lazy.Char8 as BS
 import Data.Foldable (asum)
 import Data.List (find)
-import Data.Maybe (catMaybes, isNothing)
+import Data.Maybe (catMaybes, isNothing, maybeToList)
 import qualified Data.Map as Map
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
@@ -158,10 +158,11 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     debugRendering <- current <$> toggle True eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
-    dynNotEditing <- toggle True $ mconcat [ () <$ eBackspacePressed, () <$ ePadBackPressed ]
+    dynEditing <- toggle False $ mconcat [ () <$ eBackspacePressed, () <$ ePadBackPressed ]
 
-    let notEditing = current dynNotEditing
-        editing = not <$> notEditing
+    let editing = current dynEditing
+        notEditing = not <$> editing
+        eExitEditMode = ffilter not $ updated dynEditing
 
     let space = levelSpace levelLoaded
         (playerFeetShape, playerBodyShape) = playerPhysicsRefs levelLoaded
@@ -214,6 +215,12 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         askForImage = performGetLine "Image: "
 
     eChosenImage <- fmapMaybe id <$> performEvent (askForImage <$ eQueryForImageName)
+    ghostImage <- holdDyn Nothing $ leftmost
+        [ Just <$> eChosenImage
+        , Nothing <$ eEscPressed
+        , Nothing <$ ePadBPressed
+        , Nothing <$ eExitEditMode
+        ]
 
     rec
         let eLoadNewImage = fmapMaybe id $
@@ -332,8 +339,8 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         initialCharacters <- sequenceA $
                 uncurry initAiCharacter <$> zip initialAiShapes initialAiSprites
 
-        eDeadCharactersRemoved <-
-            performEvent (removeDeadCharacters <$> current aiCharacters <*> characterHealths <@ eACharacterDied)
+        eDeadCharactersRemoved <- performEvent $
+            removeDeadCharacters <$> current aiCharacters <*> characterHealths <@ eACharacterDied
 
         (aiCharacters :: Dynamic t [CharacterOutput t]) <-
             holdDyn initialCharacters eDeadCharactersRemoved
@@ -377,12 +384,13 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         eUPressed = pressEvent SFML.KeyU
         editingCommand eKey ePad = gate editing $ leftmost [ () <$ eKey, () <$ ePad ]
 
-        eCreateNewWall = editingCommand eSpacePressed ePadAPressed
+        eCreateNewWall = gate (isNothing <$> current ghostImage) $
+            editingCommand eSpacePressed ePadAPressed
         eSnapToShape = editingCommand eUPressed ePadLTPressed
         eDeleteShape = editingCommand eDeletePressed ePadRTPressed
 
-        cameraBehavior _ True = return $ H.toV2 <$> playerPosition
-        cameraBehavior startPos False = do
+        cameraBehavior _ False = return $ H.toV2 <$> playerPosition
+        cameraBehavior startPos True = do
             p <- sample startPos
             let deltaMovements = (^*) <$> editMoveInput <@>
                     fmap ((*400) . realToFrac) clockDiffs
@@ -392,14 +400,16 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         snappingDistance = 40
 
         findClosestShape point = liftIO $ do
-            pointQueryInfo <- H.spacePointQueryNearest space (H.fromV2 point) snappingDistance groundCheckFilter
+            pointQueryInfo <-
+                H.spacePointQueryNearest space (H.fromV2 point) snappingDistance groundCheckFilter
             let closestShape = H.pointQueryInfoShape pointQueryInfo
             if closestShape == nullPtr
                 then return Nothing
                 else return $ Just pointQueryInfo
 
         findCorner currentMiscRefs pointQueryInfo =
-            let mShapeRefs = find (\(shape, _) -> shape == H.pointQueryInfoShape pointQueryInfo) currentMiscRefs
+            let mShapeRefs =
+                    find (\(shape, _) -> shape == H.pointQueryInfoShape pointQueryInfo) currentMiscRefs
                 point = H.pointQueryInfoPoint pointQueryInfo
             in case mShapeRefs of
                 Just (_, H.LineSegment c1 c2 _) ->
@@ -416,7 +426,8 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
                     H.toV2 point
 
         checkShapeForDeletion currentMiscRefs pointQueryInfo = liftIO $ do
-            let mShapeRefs = find (\(shape, _) -> shape == H.pointQueryInfoShape pointQueryInfo) currentMiscRefs
+            let mShapeRefs =
+                    find (\(shape, _) -> shape == H.pointQueryInfoShape pointQueryInfo) currentMiscRefs
             case mShapeRefs of
                 Just refs@(shape, H.LineSegment s e _) -> do
                     putStrLn $ "Gonna delete " ++ show refs
@@ -466,7 +477,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         let eSnapPos = findCorner <$> miscRefs <@> eShapeToSnapTo
 
         newWallPos <- hold Nothing $ leftmost
-            [ Nothing <$ updated dynNotEditing
+            [ Nothing <$ eExitEditMode
             , Nothing <$ ePadBPressed
             , Nothing <$ eEscPressed
             , Just <$> cameraPosition <@ eCreateNewWall
@@ -484,7 +495,10 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
 
         eNewCreatedWall <- performEvent $ liftIO . createWall space <$> eNewWallEdge
 
-        let eAddNewImage = (\pos name -> (name, H.fromV2 pos, 0)) <$> cameraPosition <@> eChosenImage
+        let ePlaceImage = push (\_ -> sample $ current ghostImage) $
+                leftmost [ () <$ ePadAPressed, () <$ eSpacePressed ]
+
+            eAddNewImage = (\pos name -> (name, H.fromV2 pos, 0)) <$> cameraPosition <@> ePlaceImage
             eLevelDataUpdates = mergeWith (.)
                 [ addWall <$> eNewWallEdge
                 , removeWall . snd <$> eShapeShouldBeDeleted
@@ -493,8 +507,8 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         currentLevelData <- foldDyn ($) (initialData levelLoaded) eLevelDataUpdates
 
         cameraPosition <- switcher (H.toV2 <$> playerPosition) $ leftmost
-            [ pushAlways (cameraBehavior $ fmap H.toV2 playerPosition) (updated dynNotEditing)
-            , pushAlways (\p -> cameraBehavior (pure p) False) eSnapPos
+            [ pushAlways (cameraBehavior $ fmap H.toV2 playerPosition) (updated dynEditing)
+            , pushAlways (\p -> cameraBehavior (pure p) True) eSnapPos
             ]
 
     let saveLevel levelData = liftIO $ HL.runInputT HL.defaultSettings $ do
@@ -528,6 +542,16 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
                     (\s -> StaticSprite s (H.toV2 pos) angle 1)
                     <$> Map.lookup imgfile imageDb
             return $ fmapMaybe spriteForPath images
+
+        renderGhost = do
+            imageDb <- current loadedImages
+            mghost <- current ghostImage
+            pos <- cameraPosition
+
+            let spriteForPath imgfile = (\s -> StaticSprite s pos 0 0.8)
+                    <$> Map.lookup imgfile imageDb
+
+            return $ maybeToList $ mghost >>= spriteForPath
 
         renderCrosshair = do
             p <- cameraPosition
@@ -631,6 +655,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         { cameraCenterPosition = cameraPosition
         , renderCommands =
                 renderBackground
+                <> renderGhost
                 <> renderJetpack
                 <> characterRendering player
                 <> aiRendering

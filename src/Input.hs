@@ -41,6 +41,7 @@ wasButtonPressed _ _ = False
 data GamepadInput = GamepadInput
     { leftXAxis :: CDouble
     , leftYAxis :: CDouble
+    , rightXAxis :: CDouble
     , yPressed :: Bool
     }
 
@@ -56,6 +57,7 @@ type JoystickID = Int
 sfmlAxisIndex :: SFML.JoystickAxis -> Int
 sfmlAxisIndex SFML.JoystickX = 0
 sfmlAxisIndex SFML.JoystickY = 1
+sfmlAxisIndex SFML.JoystickZ = 2
 
 -- TODO: check
 padButtonA, padButtonB, padButtonX, padButtonY :: Int
@@ -84,10 +86,12 @@ pollInput mGamepad =
            Just gamepad -> do
                currentLeftXAxis <- getAxis gamepad SFML.JoystickX
                currentLeftYAxis <- getAxis gamepad SFML.JoystickY
+               currentRightXAxis <- getAxis gamepad SFML.JoystickZ
                currentYPressed <- liftIO $ SFML.isJoystickButtonPressed gamepad padButtonY
                return GamepadInput
                    { leftXAxis = CDouble $ float2Double $ deadzone currentLeftXAxis
                    , leftYAxis = CDouble $ float2Double $ deadzone currentLeftYAxis
+                   , rightXAxis = CDouble $ float2Double $ deadzone currentRightXAxis
                    , yPressed = currentYPressed
                    }
 

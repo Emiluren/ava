@@ -343,12 +343,10 @@ main = do
 
             SFML.display renderTexture
             True <- SFML.setActive renderTexture False
-            --SDL.rendererRenderTarget textureRenderer $= Nothing
-            --renderTexture <- SDL.createTextureFromSurface screenRenderer renderingSurface
+
             (SFML.Vec2u ww wh) <- SFML.getWindowSize window
             let scale = fromIntegral ww / renderTextureSize
                 renderPos = SFML.Vec2f 0 $ fromIntegral wh * (1 - scale) / 2
-                -- renderSize = V2 renderTextureSize dispHeight
 
             Right renderTextureSprite <- SFML.createSprite
             tex <- SFML.getRenderTexture renderTexture

@@ -290,7 +290,8 @@ aiCharacterNetwork space playerBody eAiTick eSamplePhysics eWasHit gameTime play
                     queryLineSeg space seg groundCheckFilter
                 return (cgr, cgl, cwr, cwl)
 
-        eCanSeePlayer <- performEvent $ checkForPlayer <$> mummyDisplayDir <*> mummyVisionLine <@ eAiTick
+        eCanSeePlayer <-
+            performEvent $ checkForPlayer <$> mummyDisplayDir <*> mummyVisionLine <@ eAiTick
 
         mummySeesPlayer <- hold False eCanSeePlayer
 
@@ -298,17 +299,23 @@ aiCharacterNetwork space playerBody eAiTick eSamplePhysics eWasHit gameTime play
                 canSeePlayer <- sample mummySeesPlayer
                 dir <- sample mummyDisplayDir
 
-                let canGoLeft = H.segQueryInfoShape colGroundLeft /= nullPtr && H.segQueryInfoShape colWallLeft == nullPtr
-                    canGoRight = H.segQueryInfoShape colGroundRight /= nullPtr && H.segQueryInfoShape colWallRight == nullPtr
+                let canGoLeft = H.segQueryInfoShape colGroundLeft /= nullPtr
+                        && H.segQueryInfoShape colWallLeft == nullPtr
+                    canGoRight = H.segQueryInfoShape colGroundRight /= nullPtr
+                        && H.segQueryInfoShape colWallRight == nullPtr
 
                 return $ case currentDir of
                     AiLeft
-                        | canGoLeft -> if not canSeePlayer then (AiLeft, "Walk") else (AiLeft, "Run")
-                        | canGoRight -> if canSeePlayer then (AiStay, "Idle") else (AiRight, "Walk")
+                        | canGoLeft ->
+                              if not canSeePlayer then (AiLeft, "Walk") else (AiLeft, "Run")
+                        | canGoRight ->
+                              if canSeePlayer then (AiStay, "Idle") else (AiRight, "Walk")
                         | otherwise -> (AiStay, "Idle")
                     AiRight
-                        | canGoRight -> if not canSeePlayer then (AiRight, "Walk") else (AiRight, "Run")
-                        | canGoLeft -> if canSeePlayer then (AiStay, "Idle") else (AiLeft, "Walk")
+                        | canGoRight ->
+                              if not canSeePlayer then (AiRight, "Walk") else (AiRight, "Run")
+                        | canGoLeft ->
+                              if canSeePlayer then (AiStay, "Idle") else (AiLeft, "Walk")
                         | otherwise -> (AiStay, "Idle")
                     AiStay
                         | canSeePlayer && dir == DRight && not canGoRight -> (AiStay, "Idle")
@@ -334,7 +341,8 @@ aiCharacterNetwork space playerBody eAiTick eSamplePhysics eWasHit gameTime play
             let eWantsToHitPlayer = fmapMaybe id eHitChecks
                 eStartPunch = gate (not <$> isPunching) eWantsToHitPlayer
 
-            performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ eStartPunch
+            performEvent_ $
+                liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ eStartPunch
 
             let punchDelay = 0.25
                 punchDuration = 0.6
@@ -342,7 +350,8 @@ aiCharacterNetwork space playerBody eAiTick eSamplePhysics eWasHit gameTime play
             latestMummyPunch <- hold Nothing $ Just <$> current gameTime <@ eStartPunch
             eDelayedMummyPunch <- delayInDynTime gameTime punchDelay eStartPunch
 
-            eHitPlayer <- performEvent $ mummyPunchEffect <$> pos <*> mummyDisplayDir <@ eDelayedMummyPunch
+            eHitPlayer <- performEvent $
+                mummyPunchEffect <$> pos <*> mummyDisplayDir <@ eDelayedMummyPunch
 
             let isPunching = do
                     t <- current gameTime
@@ -373,7 +382,13 @@ aiCharacterNetwork space playerBody eAiTick eSamplePhysics eWasHit gameTime play
             aiCurrentPosition <- pos
             aiCurrentAnimation <- mummyAnimation
             aiCurrentDirection <- mummyDisplayDir
-            return [ AnimatedSprite sprite aiCurrentAnimation (H.toV2 aiCurrentPosition) aiCurrentDirection ]
+            return
+                [ AnimatedSprite
+                    sprite
+                    aiCurrentAnimation
+                    (H.toV2 aiCurrentPosition)
+                    aiCurrentDirection
+                ]
 
         renderColDebug = do
             currentAiPosition <- pos
@@ -538,7 +553,8 @@ playerNetwork startTime space sfmlEventFan eWasHit gameTime hasJetpack notEditin
         ]
 
     performEvent_ $ liftIO (Spriter.setEntityInstanceCurrentTime sprite 0) <$ ePlayerKick
-    eHitEnemy <- performEvent $ playerKickEffect <$> pos <*> playerDir <*> aiShapes <@ eDelayedPlayerKick
+    eHitEnemy <- performEvent $
+        playerKickEffect <$> pos <*> playerDir <*> aiShapes <@ eDelayedPlayerKick
 
     performEvent_ $ jump <$> eJump
 
@@ -607,7 +623,8 @@ playerNetwork startTime space sfmlEventFan eWasHit gameTime hasJetpack notEditin
             | moving = "Run"
             | otherwise = "Idle"
 
-        playerAnimation = pickAnimation <$> playerMoving <*> onGround <*> current playerIsKicking
+        playerAnimation =
+            pickAnimation <$> playerMoving <*> onGround <*> current playerIsKicking
         horizontalForce = bool <$> playerAirForce <*> pure H.zero <*> dontUseTheForce
         verticalForce = bool H.zero (H.Vector 0 $ -6000) <$> jetpackOn
         playerForce = horizontalForce + verticalForce
