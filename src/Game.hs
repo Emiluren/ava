@@ -146,6 +146,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             select sfmlEventFan (JoyButtonEvent 0)
         ePadAPressed = padFilterButtonPress padButtonA
         ePadBPressed = padFilterButtonPress padButtonB
+        ePadYPressed = padFilterButtonPress padButtonY
         ePadLTPressed = padFilterButtonPress padTriggerLeft
         ePadRTPressed = padFilterButtonPress padTriggerRight
         ePadBackPressed = padFilterButtonPress padButtonBack
@@ -453,8 +454,11 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         removeWall wall levelData = levelData
             { wallEdges = filter (/= wall) $ wallEdges levelData
             }
-        addBackgroundImage newImg levelData = levelData
-            { levelBackgroundImages = newImg : levelBackgroundImages levelData
+        addBackgroundImage img levelData = levelData
+            { levelBackgroundImages = img : levelBackgroundImages levelData
+            }
+        removeBackgroundImage img levelData = levelData
+            { levelBackgroundImages = filter (/= img) $ levelBackgroundImages levelData
             }
 
     rec
@@ -509,10 +513,32 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
 
             eAddNewImage = (\pos (name, angle) -> (name, H.fromV2 pos, angle))
                 <$> cameraPosition <@> ePlaceImage
+
+            imageRemoveRange = 100
+
+            findImageToRemove :: SFML.SFEvent -> PushM t (Maybe (String, H.Vector, H.CpFloat))
+            findImageToRemove _ = do
+                camPos <- H.fromV2 <$> sample cameraPosition
+                let pickClosest img@(_, imgPos, _) old =
+                        let imgDist = H.len (camPos - imgPos)
+                        in if imgDist > imageRemoveRange then
+                            old
+                        else
+                            case old of
+                                Nothing -> Just img
+                                Just (_, oldPos, _) ->
+                                    if H.len (camPos - oldPos) > imgDist then
+                                        Just img
+                                    else
+                                        old
+                images <- sample $ levelBackgroundImages <$> current currentLevelData
+                return $ foldr pickClosest Nothing images
+
             eLevelDataUpdates = mergeWith (.)
                 [ addWall <$> eNewWallEdge
                 , removeWall . snd <$> eShapeShouldBeDeleted
                 , addBackgroundImage <$> eAddNewImage
+                , removeBackgroundImage <$> push findImageToRemove ePadYPressed
                 ]
         currentLevelData <- foldDyn ($) (initialData levelLoaded) eLevelDataUpdates
 
