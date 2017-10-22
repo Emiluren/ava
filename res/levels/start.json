@@ -1,5 +1,29 @@
 {
-    "levelBackgroundImages" : [
+    "levelBackgroundImages": [
+        [
+            "blob.png",
+            {
+                "cpVecY": 52.68968986402862,
+                "cpVecX": 346.6791152927887
+            },
+            0
+        ],
+        [
+            "blob.png",
+            {
+                "cpVecY": 5.255091064028562,
+                "cpVecX": 376.21133969278856
+            },
+            0
+        ],
+        [
+            "blob.png",
+            {
+                "cpVecY": 106.60471786402857,
+                "cpVecX": 303.62553369278857
+            },
+            0
+        ],
         [
             "blob.png",
             {
@@ -9,7 +33,12 @@
             0
         ]
     ],
-    "levelexits" : [
+    "physicalObjects": [],
+    "playerStartPosition": {
+        "cpVecY": 120,
+        "cpVecX": 240
+    },
+    "levelexits": [
         [
             {
                 "cpVecY": -30,
@@ -35,11 +64,6 @@
             "instruction_move.png"
         ]
     ],
-    "physicalObjects": [],
-    "playerStartPosition": {
-        "cpVecY": 120,
-        "cpVecX": 240
-    },
     "pickupableObjects": [],
     "wallEdges": [
         [

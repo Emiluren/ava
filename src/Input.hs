@@ -31,6 +31,9 @@ isKey keycode = (== keycode) . eventKeycode
 isKeyPressed :: SFML.KeyCode -> SFML.SFEvent -> Bool
 isKeyPressed key event = isPress event && isKey key event
 
+isCtrlKeyPressed :: SFML.KeyCode -> SFML.SFEvent -> Bool
+isCtrlKeyPressed key event = isKeyPressed key event && SFML.ctrl event
+
 wasButtonPressed :: Int -> SFML.SFEvent -> Bool
 wasButtonPressed button (SFML.SFEvtJoystickButtonPressed _ b) = button == b
 wasButtonPressed _ _ = False

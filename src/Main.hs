@@ -277,7 +277,7 @@ main = do
         loadImage filename pivotX pivotY = do
             name <- peekCString filename
 
-            tex <- loadSprite name
+            Just tex <- loadSprite name
             putStrLn $ "Loaded: " ++ name
 
             let sprite = Spriter.Sprite

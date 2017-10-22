@@ -10,8 +10,7 @@ import Data.Bool (bool)
 import qualified Data.ByteString.Lazy.Char8 as BS
 import Data.Foldable (asum)
 import Data.List (find)
-import Data.Maybe (catMaybes)
-import Data.Map ((!))
+import Data.Maybe (catMaybes, isNothing)
 import qualified Data.Map as Map
 import Data.Monoid ((<>))
 import Data.StateVar (($=), get)
@@ -104,12 +103,26 @@ createWall space (start, end) = do
     H.spaceAddShape space wallShape
     return (wallShape, wst)
 
-loadSprite :: MonadIO m => FilePath -> m SFML.Sprite
+loadSprite :: MonadIO m => FilePath -> m (Maybe SFML.Sprite)
 loadSprite filepath = liftIO $ do
-    Right texture <- SFML.textureFromFile filepath Nothing
-    Right sprite <- SFML.createSprite
-    SFML.setTexture sprite texture True
-    return sprite
+    mtex <- SFML.textureFromFile filepath Nothing
+    mspr <- SFML.createSprite
+    case (mtex, mspr) of
+        (Right texture, Right sprite) ->
+            SFML.setTexture sprite texture True
+            >> return (Just sprite)
+        _ -> return Nothing
+
+mseq :: Monad m => m (Maybe a) -> m (Maybe b) -> (a -> b -> c) -> m (Maybe c)
+mseq act1 act2 comb = do
+    mres1 <- act1
+    case mres1 of
+        Nothing -> return Nothing
+        Just res1 -> do
+            mres2 <- act2
+            case mres2 of
+                Nothing -> return Nothing
+                Just res2 -> return $ Just $ comb res1 res2
 
 initLevelNetwork :: forall t m. MonadGame t m =>
     Time.UTCTime ->
@@ -121,6 +134,7 @@ initLevelNetwork :: forall t m. MonadGame t m =>
     m (LogicOutput t)
 initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (levelLoaded, levelName, initialPlayerState) = do
     let pressEvent kc = ffilter (isKeyPressed kc) $ select sfmlEventFan KeyEvent
+        ctrlPressEvent kc = ffilter (isCtrlKeyPressed kc) $ select sfmlEventFan KeyEvent
         eF1Pressed = pressEvent SFML.KeyF1
         eF2Pressed = pressEvent SFML.KeyF2
         eF3Pressed = pressEvent SFML.KeyF3
@@ -147,6 +161,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     dynNotEditing <- toggle True $ mconcat [ () <$ eBackspacePressed, () <$ ePadBackPressed ]
 
     let notEditing = current dynNotEditing
+        editing = not <$> notEditing
 
     let space = levelSpace levelLoaded
         (playerFeetShape, playerBodyShape) = playerPhysicsRefs levelLoaded
@@ -180,22 +195,45 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             <*> characterDbg
             <*> colCheckDbg
 
-    jetpackTex <- loadSprite "res/jetpack.png"
+    Just jetpackTex <- loadSprite "res/jetpack.png"
     liftIO $ putStrLn "Loaded: res/jetpack.png"
-    particleTex <- loadSprite "res/jetpack particle.png"
+    Just particleTex <- loadSprite "res/jetpack particle.png"
     liftIO $ putStrLn "Loaded: res/jetpack particle.png"
 
     initialImages <- liftIO $ do
         let images = levelBackgroundImages $ initialData levelLoaded
             filenames = (\(x, _, _) -> x) <$> images
-        sprites <- forM filenames $ \file ->
-            loadSprite $ "res/background_images/" ++ file
-        return $ Map.fromList $ zip filenames sprites
+        sprites <- forM filenames $ \file -> do
+            msprite <- loadSprite $ "res/background_images/" ++ file
+            when (isNothing msprite) $ putStrLn $ "Could not load " ++ file
+            return $ (,) <$> Just file <*> msprite
+        return $ Map.fromList $ catMaybes sprites
 
-    let eLoadedImage = never
-        updateImages newImgPath db = db
+    let eQueryForImageName = gate editing $ ctrlPressEvent SFML.KeyI
+        performGetLine = liftIO . HL.runInputT HL.defaultSettings . HL.getInputLine
+        askForImage = performGetLine "Image: "
 
-    loadedImages <- foldDyn updateImages initialImages eLoadedImage
+    eChosenImage <- fmapMaybe id <$> performEvent (askForImage <$ eQueryForImageName)
+
+    rec
+        let eLoadNewImage = fmapMaybe id $
+                (\db n -> if Map.member n db then Nothing else Just n)
+                <$> current loadedImages
+                <@> eChosenImage
+
+            loadBackgroundImage :: String -> Performable m (Maybe (String, SFML.Sprite))
+            loadBackgroundImage name = liftIO $ do
+                putStrLn $ "loading " ++ name
+                let filepath = "res/background_images/" ++ name
+                msprite <- loadSprite filepath
+                case msprite of
+                    Just sprite -> return $ Just (name, sprite)
+                    Nothing -> putStrLn ("Could not load: " ++ filepath) >> return Nothing
+
+        eLoadedImage <- fmapMaybe id <$> performEvent (loadBackgroundImage <$> eLoadNewImage)
+
+        let updateImages = uncurry Map.insert
+        loadedImages <- foldDyn updateImages initialImages eLoadedImage
 
     let mJetpackPosition = snd <$> find (\(t, _) -> t == Jetpack) (pickupableObjects $ initialData levelLoaded)
 
@@ -328,10 +366,6 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         wPressed = ($ SFML.KeyW) <$> pressedKeys
         sPressed = ($ SFML.KeyS) <$> pressedKeys
         keyMovementY = controlVx 1 <$> wPressed <*> sPressed
-        ctrlPressed = liftIO $ do
-            lctrl <- SFML.isKeyPressed SFML.KeyLControl
-            rctrl <- SFML.isKeyPressed SFML.KeyRControl
-            return (lctrl || rctrl)
 
         xInput = limit $ fmap leftXAxis gamepadInput + keyMovementX
         yInput = limit $ fmap leftYAxis gamepadInput + keyMovementY
@@ -340,10 +374,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
 
         eSpacePressed = pressEvent SFML.KeySpace
         eDeletePressed = pressEvent SFML.KeyDelete
-        eSPressed = pressEvent SFML.KeyS
         eUPressed = pressEvent SFML.KeyU
-
-        editing = not <$> notEditing
         editingCommand eKey ePad = gate editing $ leftmost [ () <$ eKey, () <$ ePad ]
 
         eCreateNewWall = editingCommand eSpacePressed ePadAPressed
@@ -396,14 +427,26 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
                 _ ->
                     return Nothing
 
+    let addWall wall levelData = levelData
+            { wallEdges = wall : wallEdges levelData
+            }
+        removeWall wall levelData = levelData
+            { wallEdges = filter (/= wall) $ wallEdges levelData
+            }
+        addBackgroundImage newImg levelData = levelData
+            { levelBackgroundImages = newImg : levelBackgroundImages levelData
+            }
+
     rec
         let findClosestShapeOn :: Event t a -> m (Event t H.PointQueryInfo)
-            findClosestShapeOn event = fmapMaybe id <$> performEvent (findClosestShape <$> cameraPosition <@ event)
+            findClosestShapeOn event = fmapMaybe id <$>
+                performEvent (findClosestShape <$> cameraPosition <@ event)
 
         eShapeToSnapTo <- findClosestShapeOn eSnapToShape
         eShapeToDelete <- findClosestShapeOn eDeleteShape
 
-        eShapeShouldBeDeleted <- fmapMaybe id <$> performEvent (checkShapeForDeletion <$> miscRefs <@> eShapeToDelete)
+        eShapeShouldBeDeleted <- fmapMaybe id <$>
+            performEvent (checkShapeForDeletion <$> miscRefs <@> eShapeToDelete)
         performEvent_ $ liftIO . H.spaceRemoveShape space . fst <$> eShapeShouldBeDeleted
 
         let updateMiscRefs ::
@@ -441,28 +484,18 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
 
         eNewCreatedWall <- performEvent $ liftIO . createWall space <$> eNewWallEdge
 
-        let updateLevelData (Right wall) levelData = levelData
-                { wallEdges = wall : wallEdges levelData
-                }
-            updateLevelData (Left wall) levelData = levelData
-                { wallEdges = filter (/= wall) $ wallEdges levelData
-                }
-            eWallDataUpdates = leftmost
-                [ Right <$> eNewWallEdge
-                , Left . snd <$> eShapeShouldBeDeleted
+        let eAddNewImage = (\pos name -> (name, H.fromV2 pos, 0)) <$> cameraPosition <@> eChosenImage
+            eLevelDataUpdates = mergeWith (.)
+                [ addWall <$> eNewWallEdge
+                , removeWall . snd <$> eShapeShouldBeDeleted
+                , addBackgroundImage <$> eAddNewImage
                 ]
-        currentLevelData <- foldDyn updateLevelData (initialData levelLoaded) eWallDataUpdates
+        currentLevelData <- foldDyn ($) (initialData levelLoaded) eLevelDataUpdates
 
         cameraPosition <- switcher (H.toV2 <$> playerPosition) $ leftmost
             [ pushAlways (cameraBehavior $ fmap H.toV2 playerPosition) (updated dynNotEditing)
             , pushAlways (\p -> cameraBehavior (pure p) False) eSnapPos
             ]
-
-    -- rec
-    --     let eImageUpdates = never
-
-    --     backgroundImages <- current <$> foldDyn updateBackgroundImages
-    --         (levelBackgroundImages $ initialData levelLoaded) eImageUpdates
 
     let saveLevel levelData = liftIO $ HL.runInputT HL.defaultSettings $ do
             liftIO $ putStr "File name: ./res/levels/"
@@ -477,7 +510,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
 
     performEvent_ $ liftIO . print <$> (cameraPosition <@ ePrintCamPos)
 
-    eSaveLevel <- ffilter id <$> performEvent (ctrlPressed <$ gate editing eSPressed)
+    let eSaveLevel = gate editing $ ctrlPressEvent SFML.KeyS
 
     performEvent_ $ saveLevel <$> current currentLevelData <@ eSaveLevel
 
@@ -491,8 +524,10 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         renderBackground = do
             imageDb <- current loadedImages
             images <- levelBackgroundImages <$> current currentLevelData
-            return $ ffor images $ \(imgfile, pos, angle) ->
-                StaticSprite (imageDb ! imgfile) (H.toV2 pos) angle 1
+            let spriteForPath (imgfile, pos, angle) =
+                    (\s -> StaticSprite s (H.toV2 pos) angle 1)
+                    <$> Map.lookup imgfile imageDb
+            return $ fmapMaybe spriteForPath images
 
         renderCrosshair = do
             p <- cameraPosition
@@ -524,24 +559,17 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             gt <- current gameTime
             let float = V2 0 $ 5 * sin (2 * realToFrac gt)
             case mJetpackPosition of
-                Just pos | not hasJet -> return [ StaticSprite jetpackTex (H.toV2 pos + float) 30 1 ]
+                Just pos | not hasJet ->
+                    return [ StaticSprite jetpackTex (H.toV2 pos + float) 30 1 ]
                 _ -> return []
 
     let eRPressed = pressEvent SFML.KeyR
         eQPressed = pressEvent SFML.KeyQ
-        eLPressed = pressEvent SFML.KeyL
-        promptForLevel = liftIO $ HL.runInputT HL.defaultSettings $ do
-            liftIO $ putStr "Level to load: "
-            mName <- HL.getInputLine "> "
-            case mName of
-                Nothing -> return Nothing
-                Just name -> do
-                    liftIO $ putStr "Have jetpack? "
-                    mJet <- HL.getInputLine "> "
-                    case mJet of
-                        Nothing -> return Nothing
-                        Just jet -> return $ Just $
-                            Loadlevel name $ PlayerState (jet == "y") Nothing
+        promptForLevel = liftIO $ HL.runInputT HL.defaultSettings $
+            mseq
+                (HL.getInputLine "Level to load: ")
+                (HL.getInputLine "Have jetpack? ")
+                (\name jet -> Loadlevel name $ PlayerState (jet == "y") Nothing)
 
         currentLevelExits = levelexits <$> current currentLevelData
         playerInside jp (H.Vector px py) (H.Vector ex ey, H.Vector ew eh, name, initPos)
@@ -558,7 +586,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
 
     performEvent_ $ liftIO (putStrLn "Restarting level") <$ eRPressed
 
-    eCtrlLPressed <- ffilter id <$> performEvent (ctrlPressed <$ eLPressed)
+    let eCtrlLPressed = ctrlPressEvent SFML.KeyL
     eCheckForLevelExit <- tickLossy (1/15) startTime
 
     eLoadLevel <- fmap (fmapMaybe id) $ performEvent $ promptForLevel <$ eCtrlLPressed
@@ -566,7 +594,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     let levelMessages = messages $ initialData levelLoaded
 
     messageSprites <- liftIO $ forM levelMessages $ \(pos, filename) -> do
-        texture <- loadSprite $ "res/" ++ filename
+        Just texture <- loadSprite $ "res/" ++ filename
         return (pos, texture)
 
     let approach desired speed startValue = do
