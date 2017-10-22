@@ -156,7 +156,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     eCurrentInput <- performEvent $ pollInput mGamepad <$ ePollInput
     gamepadInput <- hold initialInput eCurrentInput
 
-    debugRendering <- current <$> toggle True eF1Pressed
+    debugRendering <- current <$> toggle False eF1Pressed
     characterDbg <- current <$> toggle False (gate debugRendering eF2Pressed)
     colCheckDbg <- current <$> toggle False (gate debugRendering eF3Pressed)
     dynEditing <- toggle False $ mconcat [ () <$ eBackspacePressed, () <$ ePadBackPressed ]
@@ -173,7 +173,8 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     aiTick <- gate notEditing <$> tickLossy (1/15) startTime
 
     clock <- clockLossy (1/60) startTime
-    clockDiffs <- mapAccum_ (\t t' -> (t', Time.diffUTCTime t' t) ) startTime $ _tickInfo_lastUTC <$> updated clock
+    clockDiffs <- mapAccum_ (\t t' -> (t', Time.diffUTCTime t' t) ) startTime $
+        _tickInfo_lastUTC <$> updated clock
     gameTime <- foldDyn (+) 0 $ gate notEditing clockDiffs
 
     let stepPhysics playerSurfaceVel aiSurfaceVels playerForce feetShapes stepsToRun = liftIO $ do
