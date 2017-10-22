@@ -301,7 +301,7 @@ main = do
         render :: MonadIO m => V2 CDouble -> [Renderable] -> Float -> m ()
         render camOffset renderables playerHealth = liftIO $ do
             --SDL.rendererRenderTarget softwareRenderer $= Just renderTexture
-            SFML.clear renderTexture (SFML.Color 55 60 55 255)
+            SFML.clear renderTexture (SFML.Color 0 0 0 255)
             True <- SFML.setActive renderTexture True
 
             liftIO $ forM_ renderables $ \renderable ->

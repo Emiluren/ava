@@ -455,7 +455,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             { wallEdges = filter (/= wall) $ wallEdges levelData
             }
         addBackgroundImage img levelData = levelData
-            { levelBackgroundImages = img : levelBackgroundImages levelData
+            { levelBackgroundImages = levelBackgroundImages levelData ++ [img]
             }
         removeBackgroundImage img levelData = levelData
             { levelBackgroundImages = filter (/= img) $ levelBackgroundImages levelData
