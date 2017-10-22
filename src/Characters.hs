@@ -514,7 +514,7 @@ playerNetwork startTime space sfmlEventFan eWasHit gameTime hasJetpack notEditin
         playerKickEffect :: H.Vector -> Direction -> [(Ptr H.Shape, Ptr H.Shape)] -> Performable m (Maybe (Ptr H.Body))
         playerKickEffect playerP playerD currentAiShapes = do
             currentAiBodies <- mapM (get . H.shapeBody) $ fst <$> currentAiShapes
-            liftIO $ attackEffect space playerP playerD 1000
+            liftIO $ attackEffect space playerP playerD 700
                 (\_ hitBody -> if hitBody `elem` currentAiBodies then
                         putStrLn "Kicked mummy" >> return (Just hitBody)
                     else

@@ -213,13 +213,22 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
     let eQueryForImageName = gate editing $ ctrlPressEvent SFML.KeyI
         performGetLine = liftIO . HL.runInputT HL.defaultSettings . HL.getInputLine
         askForImage = performGetLine "Image: "
+        editTurnInput = limit $ fmap rightXAxis gamepadInput -- + keyTurn
 
     eChosenImage <- fmapMaybe id <$> performEvent (askForImage <$ eQueryForImageName)
-    ghostImage <- holdDyn Nothing $ leftmost
-        [ Just <$> eChosenImage
-        , Nothing <$ eEscPressed
-        , Nothing <$ ePadBPressed
-        , Nothing <$ eExitEditMode
+    let eSetGhost = leftmost
+            [ (\name -> Just (name, 0)) <$> eChosenImage
+            , Nothing <$ eEscPressed
+            , Nothing <$ ePadBPressed
+            , Nothing <$ eExitEditMode
+            ]
+        updateAngle _ _ Nothing = Nothing
+        updateAngle turn dt (Just (img, angle)) =
+            Just (img, angle + turn * dt)
+
+    ghostImage <- foldDyn ($) Nothing $ leftmost
+        [ const <$> eSetGhost
+        , updateAngle <$> editTurnInput <@> fmap ((*400) . realToFrac) clockDiffs
         ]
 
     rec
@@ -374,10 +383,10 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         sPressed = ($ SFML.KeyS) <$> pressedKeys
         keyMovementY = controlVx 1 <$> wPressed <*> sPressed
 
-        xInput = limit $ fmap leftXAxis gamepadInput + keyMovementX
-        yInput = limit $ fmap leftYAxis gamepadInput + keyMovementY
+        xInputLeft = limit $ fmap leftXAxis gamepadInput + keyMovementX
+        yInputLeft = limit $ fmap leftYAxis gamepadInput + keyMovementY
 
-        editMoveInput = V2 <$> xInput <*> yInput
+        editMoveInput = V2 <$> xInputLeft <*> yInputLeft
 
         eSpacePressed = pressEvent SFML.KeySpace
         eDeletePressed = pressEvent SFML.KeyDelete
@@ -498,7 +507,8 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
         let ePlaceImage = push (\_ -> sample $ current ghostImage) $
                 leftmost [ () <$ ePadAPressed, () <$ eSpacePressed ]
 
-            eAddNewImage = (\pos name -> (name, H.fromV2 pos, 0)) <$> cameraPosition <@> ePlaceImage
+            eAddNewImage = (\pos (name, angle) -> (name, H.fromV2 pos, angle))
+                <$> cameraPosition <@> ePlaceImage
             eLevelDataUpdates = mergeWith (.)
                 [ addWall <$> eNewWallEdge
                 , removeWall . snd <$> eShapeShouldBeDeleted
@@ -548,7 +558,7 @@ initLevelNetwork startTime sfmlEventFan eStepPhysics pressedKeys mGamepad (level
             mghost <- current ghostImage
             pos <- cameraPosition
 
-            let spriteForPath imgfile = (\s -> StaticSprite s pos 0 0.8)
+            let spriteForPath (imgfile, angle) = (\s -> StaticSprite s pos angle 0.8)
                     <$> Map.lookup imgfile imageDb
 
             return $ maybeToList $ mghost >>= spriteForPath

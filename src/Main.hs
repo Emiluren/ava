@@ -346,7 +346,7 @@ main = do
 
             (SFML.Vec2u ww wh) <- SFML.getWindowSize window
             let scale = fromIntegral ww / renderTextureSize
-                renderPos = SFML.Vec2f 0 $ fromIntegral wh * (1 - scale) / 2
+                renderPos = SFML.Vec2f 0 $ (fromIntegral wh - renderTextureSize * scale) / 2
 
             Right renderTextureSprite <- SFML.createSprite
             tex <- SFML.getRenderTexture renderTexture
@@ -355,6 +355,9 @@ main = do
             SFML.setScale renderTextureSprite (SFML.Vec2f scale scale)
 
             SFML.setFloatParameter shader "health" playerHealth
+            -- view <- SFML.getView window
+            -- SFML.resetView view $ SFML.FloatRect 0 0 (fromIntegral ww) (fromIntegral wh)
+            -- SFML.setView window view
             SFML.drawSprite window renderTextureSprite $
                 Just $ SFML.renderStates { SFML.shader = shader}
             SFML.display window

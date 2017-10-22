@@ -2,9 +2,7 @@
 module Input where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.Int (Int16)
 import Data.GADT.Compare.TH
-import Data.Word (Word8)
 import Foreign.C.Types (CDouble(..))
 import GHC.Float (float2Double)
 
@@ -49,15 +47,18 @@ initialInput :: GamepadInput
 initialInput = GamepadInput
     { leftXAxis = 0
     , leftYAxis = 0
+    , rightXAxis = 0
     , yPressed = False
     }
 
 type JoystickID = Int
 
-sfmlAxisIndex :: SFML.JoystickAxis -> Int
-sfmlAxisIndex SFML.JoystickX = 0
-sfmlAxisIndex SFML.JoystickY = 1
-sfmlAxisIndex SFML.JoystickZ = 2
+data JoystickAxis = JoyLX | JoyLY | JoyRX
+
+sfmlAxisIndex :: JoystickAxis -> Int
+sfmlAxisIndex JoyLX = 0
+sfmlAxisIndex JoyLY = 1
+sfmlAxisIndex JoyRX = 4
 
 -- TODO: check
 padButtonA, padButtonB, padButtonX, padButtonY :: Int
@@ -84,9 +85,9 @@ pollInput mGamepad =
     in case mGamepad of
            Nothing -> return initialInput
            Just gamepad -> do
-               currentLeftXAxis <- getAxis gamepad SFML.JoystickX
-               currentLeftYAxis <- getAxis gamepad SFML.JoystickY
-               currentRightXAxis <- getAxis gamepad SFML.JoystickZ
+               currentLeftXAxis <- getAxis gamepad JoyLX
+               currentLeftYAxis <- getAxis gamepad JoyLY
+               currentRightXAxis <- getAxis gamepad JoyRX
                currentYPressed <- liftIO $ SFML.isJoystickButtonPressed gamepad padButtonY
                return GamepadInput
                    { leftXAxis = CDouble $ float2Double $ deadzone currentLeftXAxis
